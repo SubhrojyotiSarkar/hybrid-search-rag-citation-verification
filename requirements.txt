@@ -1,0 +1,26 @@
+# CPU-only PyTorch wheels (avoids downloading the multi-GB CUDA build)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+
+# Backend
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+pydantic==2.14.1
+pydantic-settings==2.15.0
+
+# Ingestion and retrieval
+pymupdf==1.28.2
+sentence-transformers==6.1.0
+faiss-cpu==1.15.1
+numpy==2.4.6
+
+# LLM
+anthropic==1.13.0
+
+# Frontend
+streamlit==1.65.0
+httpx==0.28.1
+
+# Testing
+pytest==9.1.1
