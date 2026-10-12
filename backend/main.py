@@ -10,8 +10,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from backend.api import documents
 from backend.config import get_settings
+from backend.ingestion.chunker import HuggingFaceTokenizer
 from backend.schemas import HealthResponse
+from backend.storage.database import Database
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,12 +27,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     settings.ensure_directories()
     logger.info("Data directory: %s", settings.data_dir)
+
+    app.state.db = Database(settings.database_path)
+    app.state.db.initialize()
+    # Lazy: the tokenizer files are downloaded on the first upload, not at startup.
+    app.state.tokenizer = HuggingFaceTokenizer(settings.embedding_model_name)
     if not settings.llm_configured:
         logger.warning("No LLM API key configured; question answering will be unavailable.")
     yield
 
 
 app = FastAPI(title="Hybrid-Search RAG with Citation Verification", version="0.1.0", lifespan=lifespan)
+app.include_router(documents.router)
 
 
 @app.get("/health", response_model=HealthResponse)

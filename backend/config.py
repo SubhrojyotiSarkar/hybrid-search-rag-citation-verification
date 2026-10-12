@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # Upload limits.
     max_upload_mb: int = Field(default=25, gt=0)
 
+    # Pages with fewer visible (non-whitespace) characters are reported as empty,
+    # e.g. scanned images or blank pages.
+    min_page_chars: int = Field(default=20, ge=1)
+
     # Embeddings and chunking. all-MiniLM-L6-v2 truncates input at 256 word-pieces,
     # so chunks are kept below that limit (measured with the model's own tokenizer).
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -62,6 +66,10 @@ class Settings(BaseSettings):
     @property
     def index_dir(self) -> Path:
         return self.data_dir / "indexes"
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
 
     @property
     def database_path(self) -> Path:
