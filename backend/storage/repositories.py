@@ -2,10 +2,17 @@
 
 import json
 import sqlite3
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 
 from backend.schemas import Chunk, DocumentRecord, DocumentStatus
 from backend.storage.database import Database
+
+# Stay well below SQLite's limit on the number of "?" parameters in one statement.
+SQL_BATCH_SIZE = 500
+
+CHUNK_COLUMNS = """c.vector_id, c.chunk_id, c.document_id, d.filename, c.page_number,
+                   c.page_label, c.chunk_index, c.start_char, c.end_char, c.token_count, c.text"""
 
 
 class DuplicateHashError(Exception):
@@ -14,6 +21,22 @@ class DuplicateHashError(Exception):
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _batched(values: Iterable, size: int = SQL_BATCH_SIZE) -> Iterator[list]:
+    values = list(values)
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
+def _placeholders(count: int) -> str:
+    return ",".join("?" * count)
+
+
+def _row_to_chunk(row: sqlite3.Row) -> Chunk:
+    data = dict(row)
+    data.pop("vector_id", None)
+    return Chunk(**data)
 
 
 def _row_to_document(row: sqlite3.Row) -> DocumentRecord:
@@ -69,12 +92,12 @@ class DocumentRepository:
         with self.db.connect() as conn:
             conn.executemany(
                 """INSERT INTO chunks
-                   (chunk_id, document_id, chunk_index, page_number, start_char, end_char,
-                    token_count, text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (chunk_id, document_id, chunk_index, page_number, page_label, start_char,
+                    end_char, token_count, text)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
-                    (c.chunk_id, c.document_id, c.chunk_index, c.page_number, c.start_char,
-                     c.end_char, c.token_count, c.text)
+                    (c.chunk_id, c.document_id, c.chunk_index, c.page_number, c.page_label,
+                     c.start_char, c.end_char, c.token_count, c.text)
                     for c in chunks
                 ],
             )
@@ -105,17 +128,110 @@ class DocumentRepository:
                  json.dumps(empty_pages or []), _now(), document_id),
             )
 
+    def mark_indexed(self, document_id: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE documents SET status = ?, updated_at = ? WHERE document_id = ?",
+                (DocumentStatus.INDEXED, _now(), document_id),
+            )
+
+    def mark_chunked_as_indexed(self) -> int:
+        """Promote CHUNKED documents (ingestion interrupted after chunking) once their
+        vectors have been restored. Returns the number of documents promoted."""
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE documents SET status = ?, updated_at = ? WHERE status = ?",
+                (DocumentStatus.INDEXED, _now(), DocumentStatus.CHUNKED),
+            )
+        return cursor.rowcount
+
+    def fail_interrupted(self) -> int:
+        """Mark documents left in PROCESSING by a crash or restart as FAILED."""
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE documents SET status = ?, error_code = 'interrupted',
+                       error_message = 'Processing was interrupted. Delete and re-upload the file.',
+                       updated_at = ?
+                   WHERE status = ?""",
+                (DocumentStatus.FAILED, _now(), DocumentStatus.PROCESSING),
+            )
+        return cursor.rowcount
+
     def list_chunks(self, document_id: str) -> list[Chunk]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                """SELECT c.chunk_id, c.document_id, d.filename, c.page_number, c.chunk_index,
-                          c.start_char, c.end_char, c.token_count, c.text
-                   FROM chunks c JOIN documents d ON d.document_id = c.document_id
-                   WHERE c.document_id = ?
-                   ORDER BY c.chunk_index""",
+                f"""SELECT {CHUNK_COLUMNS}
+                    FROM chunks c JOIN documents d ON d.document_id = c.document_id
+                    WHERE c.document_id = ?
+                    ORDER BY c.chunk_index""",
                 (document_id,),
             ).fetchall()
-        return [Chunk(**dict(row)) for row in rows]
+        return [_row_to_chunk(row) for row in rows]
+
+    def vector_ids_for_document(self, document_id: str) -> list[int]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT vector_id FROM chunks WHERE document_id = ? ORDER BY vector_id", (document_id,)
+            ).fetchall()
+        return [row["vector_id"] for row in rows]
+
+    def chunk_texts_for_document(self, document_id: str) -> list[tuple[int, str]]:
+        """(vector_id, text) pairs for embedding one document's chunks."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT vector_id, text FROM chunks WHERE document_id = ? ORDER BY vector_id",
+                (document_id,),
+            ).fetchall()
+        return [(row["vector_id"], row["text"]) for row in rows]
+
+    def chunk_texts(self, vector_ids: Iterable[int]) -> list[tuple[int, str]]:
+        """(vector_id, text) pairs for re-embedding specific chunks during reconciliation."""
+        pairs: list[tuple[int, str]] = []
+        with self.db.connect() as conn:
+            for batch in _batched(sorted(vector_ids)):
+                rows = conn.execute(
+                    f"SELECT vector_id, text FROM chunks WHERE vector_id IN ({_placeholders(len(batch))})",
+                    batch,
+                ).fetchall()
+                pairs.extend((row["vector_id"], row["text"]) for row in rows)
+        return pairs
+
+    def indexable_vector_ids(self) -> set[int]:
+        """vector_ids that should be in FAISS: chunks of CHUNKED or INDEXED documents."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                """SELECT c.vector_id FROM chunks c JOIN documents d ON d.document_id = c.document_id
+                   WHERE d.status IN (?, ?)""",
+                (DocumentStatus.CHUNKED, DocumentStatus.INDEXED),
+            ).fetchall()
+        return {row["vector_id"] for row in rows}
+
+    def indexed_vector_ids(self, document_ids: list[str]) -> set[int]:
+        """vector_ids of the given documents, restricted to INDEXED ones."""
+        ids: set[int] = set()
+        with self.db.connect() as conn:
+            for batch in _batched(document_ids):
+                rows = conn.execute(
+                    f"""SELECT c.vector_id FROM chunks c JOIN documents d ON d.document_id = c.document_id
+                        WHERE d.status = ? AND c.document_id IN ({_placeholders(len(batch))})""",
+                    [DocumentStatus.INDEXED, *batch],
+                ).fetchall()
+                ids.update(row["vector_id"] for row in rows)
+        return ids
+
+    def get_indexed_chunks(self, vector_ids: list[int]) -> dict[int, Chunk]:
+        """Map vector_id -> Chunk, only for chunks belonging to INDEXED documents."""
+        chunks: dict[int, Chunk] = {}
+        with self.db.connect() as conn:
+            for batch in _batched(vector_ids):
+                rows = conn.execute(
+                    f"""SELECT {CHUNK_COLUMNS}
+                        FROM chunks c JOIN documents d ON d.document_id = c.document_id
+                        WHERE d.status = ? AND c.vector_id IN ({_placeholders(len(batch))})""",
+                    [DocumentStatus.INDEXED, *batch],
+                ).fetchall()
+                chunks.update((row["vector_id"], _row_to_chunk(row)) for row in rows)
+        return chunks
 
     def delete(self, document_id: str) -> bool:
         """Delete a document and (via ON DELETE CASCADE) its chunks. Returns False if absent."""

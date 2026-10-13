@@ -1,17 +1,24 @@
-"""Ingestion orchestration: validate -> store -> extract -> chunk -> persist.
+"""Ingestion orchestration: validate -> store -> extract -> chunk -> embed -> index.
 
 Every failure after the document record exists is recorded on that record (status FAILED
 with a reason code), so problems are visible in the document list rather than silent.
+
+Write order keeps SQLite and FAISS consistent: chunks are committed (CHUNKED), then their
+vectors are added to FAISS and saved, then the document becomes INDEXED. If the process
+dies in between, reconcile_index() completes or cleans up the work at the next startup.
 """
 
 import hashlib
 import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from backend.config import Settings
 from backend.ingestion.chunker import Tokenizer, chunk_pages
 from backend.ingestion.pdf_loader import PDFExtractionError, extract_pdf
+from backend.retrieval.embeddings import Embedder
+from backend.retrieval.vector_store import FaissVectorStore
 from backend.schemas import DocumentRecord
 from backend.storage.repositories import DocumentRepository, DuplicateHashError
 
@@ -48,15 +55,28 @@ class ExtractionFailedError(IngestionError):
     status_code = 422
 
 
+class EmbeddingFailedError(IngestionError):
+    status_code = 500
+
+
 def new_document_id() -> str:
     return f"doc_{uuid.uuid4().hex[:12]}"
 
 
 class IngestionPipeline:
-    def __init__(self, settings: Settings, repository: DocumentRepository, tokenizer: Tokenizer) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        repository: DocumentRepository,
+        tokenizer: Tokenizer,
+        embedder: Embedder,
+        vector_store: FaissVectorStore,
+    ) -> None:
         self.settings = settings
         self.repository = repository
         self.tokenizer = tokenizer
+        self.embedder = embedder
+        self.vector_store = vector_store
 
     def file_path(self, document_id: str) -> Path:
         # Stored under the generated ID, never the user's filename (avoids path traversal).
@@ -101,6 +121,7 @@ class IngestionPipeline:
                 document_id, chunks, extraction.page_count,
                 extraction.empty_page_numbers, extraction.metadata,
             )
+            self._index_document(document_id)
         except PDFExtractionError as exc:
             self.repository.mark_failed(document_id, exc.code, exc.message)
             raise ExtractionFailedError(exc.code, exc.message, document_id) from exc
@@ -116,12 +137,36 @@ class IngestionPipeline:
         logger.info("Ingested %s (%s): %d chunks", document_id, filename, len(chunks))
         return self.repository.get(document_id)
 
+    def _index_document(self, document_id: str) -> None:
+        pairs = self.repository.chunk_texts_for_document(document_id)
+        try:
+            vectors = self.embedder.encode([text for _, text in pairs])
+        except Exception as exc:
+            logger.exception("Embedding failed for %s", document_id)
+            message = "The embedding model failed to process this document."
+            self.repository.mark_failed(document_id, "embedding_failed", message)
+            raise EmbeddingFailedError("embedding_failed", message, document_id) from exc
+        self.vector_store.add(vectors, [vector_id for vector_id, _ in pairs])
+        self.vector_store.save()
+        self.repository.mark_indexed(document_id)
+
     def delete(self, document_id: str) -> bool:
-        """Remove a document, its chunks and its stored file. Returns False if it did not exist."""
-        deleted = self.repository.delete(document_id)
-        if deleted:
-            self.file_path(document_id).unlink(missing_ok=True)
-        return deleted
+        """Remove a document, its chunks, its vectors and its stored file.
+
+        SQLite is deleted first: once the chunks are gone, retrieval can no longer return
+        them even if removing the vectors fails; leftover vectors are cleaned up by
+        reconcile_index() at the next startup. Returns False if the document did not exist.
+        """
+        vector_ids = self.repository.vector_ids_for_document(document_id)
+        if not self.repository.delete(document_id):
+            return False
+        try:
+            self.vector_store.remove(vector_ids)
+            self.vector_store.save()
+        except Exception:
+            logger.exception("Could not remove vectors of %s; they will be reconciled on restart", document_id)
+        self.file_path(document_id).unlink(missing_ok=True)
+        return True
 
     def _validate(self, filename: str, content: bytes) -> str:
         """Check name, size and PDF signature; return the filename stripped of any path."""
@@ -147,3 +192,42 @@ class IngestionPipeline:
             f"This file has already been uploaded as '{filename}'. Delete it first to re-ingest.",
             document_id,
         )
+
+
+@dataclass
+class ReconcileReport:
+    interrupted_documents: int
+    orphan_vectors_removed: int
+    missing_vectors_added: int
+    documents_promoted: int
+
+
+def reconcile_index(
+    repository: DocumentRepository, vector_store: FaissVectorStore, embedder: Embedder
+) -> ReconcileReport:
+    """Make FAISS contain exactly the vectors of CHUNKED/INDEXED documents in SQLite.
+
+    Runs at startup. Handles a missing or corrupt index (everything is re-embedded), an
+    embedding-model change, crashes between the SQLite and FAISS writes, and leftover
+    vectors from interrupted deletes.
+    """
+    interrupted = repository.fail_interrupted()
+
+    expected = repository.indexable_vector_ids()
+    present = vector_store.ids()
+    orphans = present - expected
+    missing = expected - present
+
+    removed = vector_store.remove(orphans)
+    if missing:
+        logger.info("Re-embedding %d chunk(s) missing from the FAISS index", len(missing))
+        pairs = repository.chunk_texts(missing)
+        vectors = embedder.encode([text for _, text in pairs])
+        vector_store.add(vectors, [vector_id for vector_id, _ in pairs])
+    if orphans or missing or vector_store.load_status != "loaded":
+        vector_store.save()
+
+    promoted = repository.mark_chunked_as_indexed()
+    report = ReconcileReport(interrupted, removed, len(missing), promoted)
+    logger.info("Index reconciliation: %s (index now holds %d vectors)", report, vector_store.count)
+    return report

@@ -4,9 +4,9 @@ Errors are returned as {"detail": {"code": ..., "message": ...}} so the frontend
 a readable message and branch on a stable code. Stack traces are never returned.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, Response, UploadFile, status
 
-from backend.config import get_settings
+from backend.api.dependencies import api_error, get_pipeline, get_repository
 from backend.ingestion.pipeline import IngestionError, IngestionPipeline
 from backend.schemas import Chunk, DocumentRecord
 from backend.storage.repositories import DocumentRepository
@@ -14,24 +14,7 @@ from backend.storage.repositories import DocumentRepository
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
-def get_repository(request: Request) -> DocumentRepository:
-    return DocumentRepository(request.app.state.db)
-
-
-def get_pipeline(
-    request: Request, repository: DocumentRepository = Depends(get_repository)
-) -> IngestionPipeline:
-    return IngestionPipeline(get_settings(), repository, request.app.state.tokenizer)
-
-
-def api_error(status_code: int, code: str, message: str, document_id: str | None = None) -> HTTPException:
-    detail = {"code": code, "message": message}
-    if document_id:
-        detail["document_id"] = document_id
-    return HTTPException(status_code=status_code, detail=detail)
-
-
-def _not_found(document_id: str) -> HTTPException:
+def _not_found(document_id: str):
     return api_error(404, "document_not_found", f"No document with id '{document_id}'.")
 
 

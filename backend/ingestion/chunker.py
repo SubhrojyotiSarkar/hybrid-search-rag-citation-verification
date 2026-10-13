@@ -123,6 +123,7 @@ def chunk_pages(
                     document_id=document_id,
                     filename=filename,
                     page_number=page.page_number,
+                    page_label=page.page_label,
                     chunk_index=index,
                     start_char=span.start_char,
                     end_char=span.end_char,

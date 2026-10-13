@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     chunk_size_tokens: int = Field(default=220, gt=0)
     chunk_overlap_tokens: int = Field(default=40, ge=0)
+    embedding_batch_size: int = Field(default=32, gt=0)
 
     # Retrieval.
     dense_top_k: int = Field(default=8, gt=0)

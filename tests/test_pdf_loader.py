@@ -15,6 +15,19 @@ def test_extracts_text_per_page_with_one_based_numbers():
     assert result.empty_page_numbers == []
 
 
+def test_printed_page_labels_are_kept_alongside_physical_numbers():
+    content = make_pdf(["First page of the article.", "Second page of the article."], first_page_label=183)
+    result = extract_pdf(content)
+
+    assert [(p.page_number, p.page_label) for p in result.pages] == [(1, "183"), (2, "184")]
+
+
+def test_pdf_without_page_labels_has_no_label():
+    result = extract_pdf(make_pdf(["Some text on the only page."]))
+
+    assert result.pages[0].page_label is None
+
+
 def test_blank_page_is_flagged_empty():
     content = make_pdf(["Some real content on the first page.", ""])
     result = extract_pdf(content)

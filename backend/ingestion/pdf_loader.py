@@ -44,6 +44,15 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
+def _page_label(page: pymupdf.Page) -> str | None:
+    """The printed page number defined in the PDF's page labels, or None if absent."""
+    try:
+        label = page.get_label().strip()
+    except Exception:
+        return None
+    return label or None
+
+
 def extract_pdf(content: bytes, min_page_chars: int = 20) -> ExtractionResult:
     """Extract normalized text for every page and flag pages with no usable text."""
     try:
@@ -68,7 +77,12 @@ def extract_pdf(content: bytes, min_page_chars: int = 20) -> ExtractionResult:
             text = normalize_text(raw_text)
             visible_chars = len(re.sub(r"\s", "", text))
             pages.append(
-                PageText(page_number=index + 1, text=text, is_empty=visible_chars < min_page_chars)
+                PageText(
+                    page_number=index + 1,
+                    page_label=_page_label(page),
+                    text=text,
+                    is_empty=visible_chars < min_page_chars,
+                )
             )
 
         metadata = {key: str(value) for key, value in (document.metadata or {}).items() if value}

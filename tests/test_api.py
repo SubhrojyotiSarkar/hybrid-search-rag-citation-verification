@@ -26,6 +26,7 @@ def test_health_reports_configuration(client):
     body = response.json()
     assert body["status"] == "ok"
     assert body["embedding_model"] == "sentence-transformers/all-MiniLM-L6-v2"
+    assert body["retrieval_ready"] is True
     assert body["llm_configured"] is True
 
 
@@ -42,12 +43,13 @@ def test_startup_creates_data_directories(client):
 
 # ---- Upload -----------------------------------------------------------------------------
 
-def test_upload_extracts_and_chunks(client):
+def test_upload_extracts_chunks_and_indexes(client):
     response = upload(client, SAMPLE_PDF)
 
     assert response.status_code == 201
     doc = response.json()
-    assert doc["status"] == "chunked"
+    assert doc["status"] == "indexed"
+    assert client.get("/health").json()["indexed_vectors"] == doc["chunk_count"]
     assert doc["page_count"] == 3
     assert doc["empty_pages"] == [2]
     assert doc["chunk_count"] >= 2

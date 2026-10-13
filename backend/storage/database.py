@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
     page_number INTEGER NOT NULL,
+    page_label  TEXT,
     start_char  INTEGER NOT NULL,
     end_char    INTEGER NOT NULL,
     token_count INTEGER NOT NULL,
@@ -42,6 +43,19 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
 """
+
+# Columns added after the first release: (table, column, SQL type). CREATE TABLE IF NOT
+# EXISTS does not alter existing tables, so these are added to older databases on startup.
+ADDED_COLUMNS = [
+    ("chunks", "page_label", "TEXT"),
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, sql_type in ADDED_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
 
 class Database:
@@ -54,6 +68,7 @@ class Database:
             # WAL lets the frontend's reads proceed while an ingestion is writing.
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
+            _migrate(conn)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
