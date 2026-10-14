@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     start_char  INTEGER NOT NULL,
     end_char    INTEGER NOT NULL,
     token_count INTEGER NOT NULL,
-    text        TEXT NOT NULL
+    text        TEXT NOT NULL,
+    context     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
@@ -48,6 +49,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
 # EXISTS does not alter existing tables, so these are added to older databases on startup.
 ADDED_COLUMNS = [
     ("chunks", "page_label", "TEXT"),
+    ("chunks", "context", "TEXT"),
 ]
 
 

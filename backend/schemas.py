@@ -5,10 +5,18 @@ the UI from drifting apart. Citation and claim models are added here in later st
 """
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 MAX_QUERY_CHARS = 2000
+
+
+def _strip_nonblank(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("must not be blank")
+    return value
 
 
 class HealthResponse(BaseModel):
@@ -16,7 +24,9 @@ class HealthResponse(BaseModel):
     app_version: str
     embedding_model: str
     retrieval_ready: bool
+    retrieval_mode: str
     indexed_vectors: int
+    bm25_chunks: int
     llm_provider: str
     llm_model: str
     llm_configured: bool
@@ -49,6 +59,14 @@ class Chunk(BaseModel):
     end_char: int = Field(gt=0)
     token_count: int = Field(gt=0)
     text: str
+    # Caption + column headers of the table this chunk continues (None otherwise). Used for
+    # indexing and in the LLM prompt; never part of the cited text or snippet.
+    context: str | None = None
+
+
+def index_text(context: str | None, text: str) -> str:
+    """The text that is embedded and BM25-indexed for a chunk: context first, then text."""
+    return f"{context}\n{text}" if context else text
 
 
 class DocumentRecord(BaseModel):
@@ -67,25 +85,31 @@ class DocumentRecord(BaseModel):
     updated_at: str
 
 
+RetrievalMode = Literal["dense", "bm25", "hybrid"]
+
+
 class RetrievedChunk(BaseModel):
     chunk: Chunk
-    score: float  # retriever-specific; for dense retrieval, cosine similarity
+    # Retriever-specific: cosine similarity (dense), BM25 score (bm25), RRF score (hybrid).
+    score: float
     rank: int = Field(ge=1)
     retriever: str
+    # Hybrid only: each component retriever's rank and score for this chunk. A retriever
+    # that did not return the chunk is absent.
+    component_ranks: dict[str, int] = Field(default_factory=dict)
+    component_scores: dict[str, float] = Field(default_factory=dict)
 
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=MAX_QUERY_CHARS)
     document_ids: list[str] | None = None  # None searches every indexed document
     top_k: int | None = Field(default=None, ge=1, le=50)
+    retriever: RetrievalMode | None = None  # None uses RETRIEVAL_MODE
 
     @field_validator("query")
     @classmethod
     def _strip_query(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("query must not be blank")
-        return value
+        return _strip_nonblank(value)
 
 
 class SearchResponse(BaseModel):
@@ -94,3 +118,104 @@ class SearchResponse(BaseModel):
     top_k: int
     results: list[RetrievedChunk]
     latency_ms: float
+
+
+# ---- Answer generation ------------------------------------------------------------------
+# GeneratedClaim / GeneratedAnswer are what the LLM must return (its JSON schema). They are
+# kept deliberately simple: everything else is computed and validated by our own code.
+
+AnswerStatus = Literal["answered", "partially_answered", "insufficient_evidence"]
+
+
+class GeneratedClaim(BaseModel):
+    text: str = Field(description="One self-contained factual statement, checkable on its own.")
+    source_labels: list[str] = Field(
+        description='Labels of the passages that directly support this claim, e.g. ["S1", "S3"].'
+    )
+
+
+class GeneratedAnswer(BaseModel):
+    answer_status: AnswerStatus
+    claims: list[GeneratedClaim]
+    missing_information: str = Field(
+        description="What the question asks that the sources do not cover; empty string if nothing."
+    )
+
+
+class VerificationStatus(StrEnum):
+    UNVERIFIED = "unverified"  # no verifier has checked this claim (Phase 1)
+    SUPPORTED = "supported"
+    CONTRADICTED = "contradicted"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    VERIFICATION_FAILED = "verification_failed"  # verifier error: NOT the same as unsupported
+
+
+class OverallStatus(StrEnum):
+    """Deliberately distinct states: only the verifier (Phase 4) can produce VERIFIED."""
+
+    UNVERIFIED = "unverified"  # generated with citations, not yet checked
+    VERIFIED = "verified_within_provided_evidence"
+    UNRESOLVED_CLAIMS = "contains_unresolved_claims"
+    VERIFICATION_FAILED = "verification_failed"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+class Citation(BaseModel):
+    source_label: str
+    chunk_id: str
+    document_id: str
+    filename: str
+    page_number: int
+    page_label: str | None = None
+    snippet: str
+
+
+class Claim(BaseModel):
+    claim_id: str
+    text: str
+    citations: list[Citation]
+    # Labels the model cited that were never provided to it (hallucinated citations).
+    invalid_source_labels: list[str] = Field(default_factory=list)
+    verification_status: VerificationStatus = VerificationStatus.UNVERIFIED
+    verification_reason: str | None = None
+
+
+class SourcePassage(BaseModel):
+    """A passage that was given to the LLM as evidence, for the source viewer."""
+
+    source_label: str
+    chunk: Chunk
+    retrieval_score: float
+    retrieval_rank: int
+
+
+class ProcessingMetadata(BaseModel):
+    retriever: str
+    top_k: int
+    llm_model: str | None = None
+    retrieval_ms: float
+    generation_ms: float | None = None
+    total_ms: float
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=MAX_QUERY_CHARS)
+    document_ids: list[str] | None = None  # None searches every indexed document
+
+    @field_validator("question")
+    @classmethod
+    def _strip_question(cls, value: str) -> str:
+        return _strip_nonblank(value)
+
+
+class AskResponse(BaseModel):
+    question: str
+    answer: str
+    answer_status: AnswerStatus
+    missing_information: str
+    claims: list[Claim]
+    sources: list[SourcePassage]
+    overall_status: OverallStatus
+    metadata: ProcessingMetadata

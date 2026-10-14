@@ -5,8 +5,10 @@ a readable message and branch on a stable code. Stack traces are never returned.
 """
 
 from fastapi import APIRouter, Depends, Response, UploadFile, status
+from fastapi.responses import FileResponse
 
 from backend.api.dependencies import api_error, get_pipeline, get_repository
+from backend.config import get_settings
 from backend.ingestion.pipeline import IngestionError, IngestionPipeline
 from backend.schemas import Chunk, DocumentRecord
 from backend.storage.repositories import DocumentRepository
@@ -53,6 +55,18 @@ def list_document_chunks(
     if repository.get(document_id) is None:
         raise _not_found(document_id)
     return repository.list_chunks(document_id)
+
+
+@router.get("/{document_id}/file")
+def get_document_file(document_id: str, repository: DocumentRepository = Depends(get_repository)) -> FileResponse:
+    """The original PDF, served inline so browsers can open it at a page (…/file#page=4)."""
+    document = repository.get(document_id)
+    path = get_settings().upload_dir / f"{document_id}.pdf"
+    if document is None or not path.is_file():
+        raise _not_found(document_id)
+    return FileResponse(
+        path, media_type="application/pdf", filename=document.filename, content_disposition_type="inline"
+    )
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

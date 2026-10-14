@@ -7,8 +7,30 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.config import get_settings
+from backend.generation.llm_client import LLMResult
 
 FAKE_API_KEY = "sk-test-not-a-real-key"
+
+
+class FakeLLM:
+    """Scripted LLM: returns `output` (or output(user_prompt) if callable), or raises `error`.
+
+    Records every call so tests can inspect the prompts that were sent.
+    """
+
+    model = "fake-llm"
+
+    def __init__(self, output=None, error: Exception | None = None) -> None:
+        self.output = output
+        self.error = error
+        self.calls: list[dict] = []
+
+    def generate_structured(self, system, user, schema, max_tokens=None):
+        self.calls.append({"system": system, "user": user, "schema": schema})
+        if self.error is not None:
+            raise self.error
+        output = self.output(user) if callable(self.output) else self.output
+        return LLMResult(output=output, model=self.model, input_tokens=120, output_tokens=40, latency_ms=5.0)
 
 
 class WhitespaceTokenizer:
@@ -60,13 +82,14 @@ def make_pdf(pages: list[str], first_page_label: int | None = None) -> bytes:
 def app_factory(tmp_path, monkeypatch):
     """Build apps that share one temp data directory, so a test can simulate a restart."""
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_API_KEY)
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", FAKE_API_KEY)
     get_settings.cache_clear()
 
     from backend.main import create_app
 
-    def factory():
-        return create_app(embedder=FakeEmbedder(), tokenizer=WhitespaceTokenizer())
+    def factory(llm_client=None):
+        return create_app(embedder=FakeEmbedder(), tokenizer=WhitespaceTokenizer(), llm_client=llm_client)
 
     yield factory
     get_settings.cache_clear()

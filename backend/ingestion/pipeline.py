@@ -17,6 +17,7 @@ from pathlib import Path
 from backend.config import Settings
 from backend.ingestion.chunker import Tokenizer, chunk_pages
 from backend.ingestion.pdf_loader import PDFExtractionError, extract_pdf
+from backend.retrieval.bm25_search import BM25Index
 from backend.retrieval.embeddings import Embedder
 from backend.retrieval.vector_store import FaissVectorStore
 from backend.schemas import DocumentRecord
@@ -71,12 +72,14 @@ class IngestionPipeline:
         tokenizer: Tokenizer,
         embedder: Embedder,
         vector_store: FaissVectorStore,
+        bm25_index: BM25Index,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.tokenizer = tokenizer
         self.embedder = embedder
         self.vector_store = vector_store
+        self.bm25_index = bm25_index
 
     def file_path(self, document_id: str) -> Path:
         # Stored under the generated ID, never the user's filename (avoids path traversal).
@@ -149,6 +152,8 @@ class IngestionPipeline:
         self.vector_store.add(vectors, [vector_id for vector_id, _ in pairs])
         self.vector_store.save()
         self.repository.mark_indexed(document_id)
+        # In-memory only: rebuilt from SQLite at startup, so it never needs saving.
+        self.bm25_index.add(pairs)
 
     def delete(self, document_id: str) -> bool:
         """Remove a document, its chunks, its vectors and its stored file.
@@ -160,6 +165,7 @@ class IngestionPipeline:
         vector_ids = self.repository.vector_ids_for_document(document_id)
         if not self.repository.delete(document_id):
             return False
+        self.bm25_index.remove(vector_ids)
         try:
             self.vector_store.remove(vector_ids)
             self.vector_store.save()

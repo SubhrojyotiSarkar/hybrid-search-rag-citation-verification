@@ -26,7 +26,7 @@ def test_initialize_adds_missing_columns_and_keeps_rows(tmp_path):
     with sqlite3.connect(path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(chunks)")}
         rows = conn.execute("SELECT chunk_id, page_label FROM chunks").fetchall()
-    assert "page_label" in columns
+    assert {"page_label", "context"} <= columns
     assert rows == [("c1", None)]
 
 

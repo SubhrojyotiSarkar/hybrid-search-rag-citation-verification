@@ -5,14 +5,15 @@ import sqlite3
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 
-from backend.schemas import Chunk, DocumentRecord, DocumentStatus
+from backend.schemas import Chunk, DocumentRecord, DocumentStatus, index_text
 from backend.storage.database import Database
 
 # Stay well below SQLite's limit on the number of "?" parameters in one statement.
 SQL_BATCH_SIZE = 500
 
 CHUNK_COLUMNS = """c.vector_id, c.chunk_id, c.document_id, d.filename, c.page_number,
-                   c.page_label, c.chunk_index, c.start_char, c.end_char, c.token_count, c.text"""
+                   c.page_label, c.chunk_index, c.start_char, c.end_char, c.token_count, c.text,
+                   c.context"""
 
 
 class DuplicateHashError(Exception):
@@ -93,11 +94,11 @@ class DocumentRepository:
             conn.executemany(
                 """INSERT INTO chunks
                    (chunk_id, document_id, chunk_index, page_number, page_label, start_char,
-                    end_char, token_count, text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    end_char, token_count, text, context)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     (c.chunk_id, c.document_id, c.chunk_index, c.page_number, c.page_label,
-                     c.start_char, c.end_char, c.token_count, c.text)
+                     c.start_char, c.end_char, c.token_count, c.text, c.context)
                     for c in chunks
                 ],
             )
@@ -175,26 +176,39 @@ class DocumentRepository:
             ).fetchall()
         return [row["vector_id"] for row in rows]
 
+    # The three methods below return (vector_id, index text) pairs: the text that is
+    # embedded and BM25-indexed, i.e. table context (if any) followed by the chunk text.
+
     def chunk_texts_for_document(self, document_id: str) -> list[tuple[int, str]]:
-        """(vector_id, text) pairs for embedding one document's chunks."""
+        """Index texts for embedding one document's chunks."""
         with self.db.connect() as conn:
             rows = conn.execute(
-                "SELECT vector_id, text FROM chunks WHERE document_id = ? ORDER BY vector_id",
+                "SELECT vector_id, context, text FROM chunks WHERE document_id = ? ORDER BY vector_id",
                 (document_id,),
             ).fetchall()
-        return [(row["vector_id"], row["text"]) for row in rows]
+        return [(row["vector_id"], index_text(row["context"], row["text"])) for row in rows]
 
     def chunk_texts(self, vector_ids: Iterable[int]) -> list[tuple[int, str]]:
-        """(vector_id, text) pairs for re-embedding specific chunks during reconciliation."""
+        """Index texts for re-embedding specific chunks during reconciliation."""
         pairs: list[tuple[int, str]] = []
         with self.db.connect() as conn:
             for batch in _batched(sorted(vector_ids)):
                 rows = conn.execute(
-                    f"SELECT vector_id, text FROM chunks WHERE vector_id IN ({_placeholders(len(batch))})",
+                    f"SELECT vector_id, context, text FROM chunks WHERE vector_id IN ({_placeholders(len(batch))})",
                     batch,
                 ).fetchall()
-                pairs.extend((row["vector_id"], row["text"]) for row in rows)
+                pairs.extend((row["vector_id"], index_text(row["context"], row["text"])) for row in rows)
         return pairs
+
+    def indexed_chunk_texts(self) -> list[tuple[int, str]]:
+        """Index texts of every chunk of an INDEXED document; used to build BM25."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                """SELECT c.vector_id, c.context, c.text FROM chunks c JOIN documents d ON d.document_id = c.document_id
+                   WHERE d.status = ? ORDER BY c.vector_id""",
+                (DocumentStatus.INDEXED,),
+            ).fetchall()
+        return [(row["vector_id"], index_text(row["context"], row["text"])) for row in rows]
 
     def indexable_vector_ids(self) -> set[int]:
         """vector_ids that should be in FAISS: chunks of CHUNKED or INDEXED documents."""

@@ -7,8 +7,9 @@ Environment variables take precedence over values in .env.
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -41,13 +42,29 @@ class Settings(BaseSettings):
     chunk_overlap_tokens: int = Field(default=40, ge=0)
     embedding_batch_size: int = Field(default=32, gt=0)
 
-    # Retrieval.
-    dense_top_k: int = Field(default=8, gt=0)
+    # Retrieval. retrieval_top_k passages are sent to the LLM (DENSE_TOP_K, its Phase 1
+    # name, is still accepted).
+    retrieval_mode: Literal["dense", "bm25", "hybrid"] = "hybrid"
+    retrieval_top_k: int = Field(
+        default=8, gt=0, validation_alias=AliasChoices("retrieval_top_k", "dense_top_k")
+    )
+    # Hybrid: candidates taken from each retriever before fusion, and the RRF constant.
+    hybrid_candidates_per_retriever: int = Field(default=20, gt=0)
+    rrf_k: int = Field(default=60, ge=0)
+    # BM25: term-frequency saturation (k1) and document-length normalization (b).
+    bm25_k1: float = Field(default=1.5, ge=0)
+    bm25_b: float = Field(default=0.75, ge=0, le=1)
 
-    # LLM provider. The key is a SecretStr so it never appears in logs or reprs.
-    llm_provider: str = "anthropic"
-    llm_model: str = "claude-opus-5-5"
-    anthropic_api_key: SecretStr | None = None
+    # LLM provider (Google Gemini). The key is a SecretStr so it never appears in logs.
+    llm_provider: str = "gemini"
+    gemini_api_key: SecretStr | None = None
+    # A free-tier model by default. Changing it may select a model without a free tier.
+    gemini_model: str = "gemini-3.8-flash"
+    # Reasoning depth: higher is more thorough but slower and uses more of the quota.
+    gemini_thinking_level: Literal["low", "medium", "high"] = "medium"
+    # Includes Gemini's thinking tokens.
+    llm_max_tokens: int = Field(default=16000, gt=0)
+    llm_timeout_seconds: float = Field(default=120.0, gt=0)
 
     @field_validator("data_dir")
     @classmethod
@@ -77,8 +94,17 @@ class Settings(BaseSettings):
         return self.data_dir / "app.db"
 
     @property
+    def llm_model(self) -> str:
+        """Provider-neutral name used in health checks and logs."""
+        return self.gemini_model
+
+    @property
     def llm_configured(self) -> bool:
-        return self.anthropic_api_key is not None and bool(self.anthropic_api_key.get_secret_value())
+        if self.gemini_api_key is None:
+            return False
+        key = self.gemini_api_key.get_secret_value().strip()
+        # The .env.example placeholder does not count as a configured key.
+        return bool(key) and key != "your-api-key-here"
 
     def ensure_directories(self) -> None:
         for directory in (self.data_dir, self.upload_dir, self.index_dir):

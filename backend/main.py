@@ -10,11 +10,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
-from backend.api import documents, search
+from backend.api import chat, documents, search
 from backend.config import get_settings
+from backend.generation.llm_client import LLMClient, create_llm_client
 from backend.ingestion.chunker import HuggingFaceTokenizer, Tokenizer
 from backend.ingestion.pipeline import reconcile_index
+from backend.retrieval.bm25_search import BM25Index
 from backend.retrieval.embeddings import Embedder, SentenceTransformerEmbedder
+from backend.retrieval.hybrid_search import RetrievalServices
 from backend.retrieval.vector_store import FaissVectorStore
 from backend.schemas import HealthResponse
 from backend.storage.database import Database
@@ -24,7 +27,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 
-def create_app(embedder: Embedder | None = None, tokenizer: Tokenizer | None = None) -> FastAPI:
+def create_app(
+    embedder: Embedder | None = None,
+    tokenizer: Tokenizer | None = None,
+    llm_client: LLMClient | None = None,
+) -> FastAPI:
     """Build the app. Tests pass lightweight fakes; production loads the real models."""
 
     @asynccontextmanager
@@ -41,21 +48,37 @@ def create_app(embedder: Embedder | None = None, tokenizer: Tokenizer | None = N
 
         # If the embedding model or index cannot be loaded, the app still starts so that
         # document listing works; retrieval endpoints then return 503 instead of crashing.
-        app.state.embedder = None
-        app.state.vector_store = None
+        app.state.retrieval = None
         try:
+            repository = DocumentRepository(app.state.db)
             active_embedder = embedder or SentenceTransformerEmbedder(
                 settings.embedding_model_name, settings.embedding_batch_size
             )
             store = FaissVectorStore.open(settings.index_dir, active_embedder.model_name, active_embedder.dimension)
-            reconcile_index(DocumentRepository(app.state.db), store, active_embedder)
-            app.state.embedder = active_embedder
-            app.state.vector_store = store
+            reconcile_index(repository, store, active_embedder)
+            # BM25 is rebuilt from SQLite on every start (after reconciliation, so it sees
+            # exactly the INDEXED documents that FAISS holds).
+            bm25_index = BM25Index(settings.bm25_k1, settings.bm25_b)
+            bm25_index.add(repository.indexed_chunk_texts())
+            logger.info("BM25 index built over %d chunks", bm25_index.count)
+            app.state.retrieval = RetrievalServices(active_embedder, store, bm25_index)
         except Exception:
             logger.exception("Retrieval is unavailable: embedding model or index failed to load")
 
-        if not settings.llm_configured:
-            logger.warning("No LLM API key configured; question answering will be unavailable.")
+        # Constructing the client makes no network call; a bad key surfaces on first use.
+        # A misconfigured provider disables question answering instead of stopping the app.
+        try:
+            app.state.llm = llm_client or create_llm_client(settings)
+        except ValueError as exc:
+            logger.error("LLM is unavailable: %s. Set LLM_PROVIDER=gemini in .env.", exc)
+            app.state.llm = None
+        if app.state.llm is None:
+            logger.warning("No LLM configured (GEMINI_API_KEY); question answering will be unavailable.")
+        else:
+            logger.info(
+                "LLM: %s / %s (thinking_level=%s)",
+                settings.llm_provider, settings.llm_model, settings.gemini_thinking_level,
+            )
         yield
 
     app = FastAPI(
@@ -63,22 +86,24 @@ def create_app(embedder: Embedder | None = None, tokenizer: Tokenizer | None = N
     )
     app.include_router(documents.router)
     app.include_router(search.router)
+    app.include_router(chat.router)
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:
         """Liveness check that also reports the active configuration (never secrets)."""
         settings = get_settings()
-        store = request.app.state.vector_store
-        retrieval_ready = request.app.state.embedder is not None and store is not None
+        retrieval = request.app.state.retrieval
         return HealthResponse(
-            status="ok" if retrieval_ready else "degraded",
+            status="ok" if retrieval is not None else "degraded",
             app_version=settings.app_version,
             embedding_model=settings.embedding_model_name,
-            retrieval_ready=retrieval_ready,
-            indexed_vectors=store.count if store is not None else 0,
+            retrieval_ready=retrieval is not None,
+            retrieval_mode=settings.retrieval_mode,
+            indexed_vectors=retrieval.vector_store.count if retrieval else 0,
+            bm25_chunks=retrieval.bm25_index.count if retrieval else 0,
             llm_provider=settings.llm_provider,
             llm_model=settings.llm_model,
-            llm_configured=settings.llm_configured,
+            llm_configured=request.app.state.llm is not None,
         )
 
     return app
