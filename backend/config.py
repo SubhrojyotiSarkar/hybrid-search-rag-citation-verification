@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     # Retrieval. retrieval_top_k passages are sent to the LLM (DENSE_TOP_K, its Phase 1
     # name, is still accepted).
-    retrieval_mode: Literal["dense", "bm25", "hybrid"] = "hybrid"
+    retrieval_mode: Literal["dense", "bm25", "hybrid", "hybrid_rerank"] = "hybrid"
     retrieval_top_k: int = Field(
         default=8, gt=0, validation_alias=AliasChoices("retrieval_top_k", "dense_top_k")
     )
@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # BM25: term-frequency saturation (k1) and document-length normalization (b).
     bm25_k1: float = Field(default=1.5, ge=0)
     bm25_b: float = Field(default=0.75, ge=0, le=1)
+    # Cross-encoder reranking (retrieval_mode "hybrid_rerank"): how many first-stage
+    # candidates are rescored. More candidates = better recall, linearly more latency.
+    reranker_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rerank_candidates: int = Field(default=30, gt=0, le=100)
+    reranker_batch_size: int = Field(default=32, gt=0)
 
     # LLM provider (Google Gemini). The key is a SecretStr so it never appears in logs.
     llm_provider: str = "gemini"

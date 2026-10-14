@@ -17,6 +17,7 @@ from backend.config import Settings
 from backend.retrieval.bm25_search import BM25Index, BM25Retriever
 from backend.retrieval.dense_retriever import DenseRetriever
 from backend.retrieval.embeddings import Embedder
+from backend.retrieval.reranker import Reranker, RerankingRetriever
 from backend.retrieval.vector_store import FaissVectorStore
 from backend.schemas import RetrievedChunk
 from backend.storage.repositories import DocumentRepository
@@ -89,18 +90,22 @@ class RetrievalServices:
     embedder: Embedder
     vector_store: FaissVectorStore
     bm25_index: BM25Index
+    reranker: Reranker
 
 
 def build_retriever(
     mode: str, services: RetrievalServices, repository: DocumentRepository, settings: Settings
 ) -> Retriever:
-    """Construct the retriever for a mode: "dense", "bm25" or "hybrid"."""
+    """Construct the retriever for a mode: "dense", "bm25", "hybrid" or "hybrid_rerank"."""
     dense = DenseRetriever(services.embedder, services.vector_store, repository)
     bm25 = BM25Retriever(services.bm25_index, repository)
     if mode == "dense":
         return dense
     if mode == "bm25":
         return bm25
+    hybrid = HybridRetriever([dense, bm25], settings.hybrid_candidates_per_retriever, settings.rrf_k)
     if mode == "hybrid":
-        return HybridRetriever([dense, bm25], settings.hybrid_candidates_per_retriever, settings.rrf_k)
+        return hybrid
+    if mode == "hybrid_rerank":
+        return RerankingRetriever(hybrid, services.reranker, settings.rerank_candidates)
     raise ValueError(f"Unknown retrieval mode '{mode}'")

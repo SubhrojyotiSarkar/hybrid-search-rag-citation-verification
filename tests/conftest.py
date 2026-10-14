@@ -60,6 +60,28 @@ class FakeEmbedder:
         return vectors / np.where(norms == 0, 1.0, norms)
 
 
+class FakeReranker:
+    """Deterministic reranker: scores a passage by how many query words it contains.
+
+    Unlike the bag-of-words FakeEmbedder it counts exact (case-insensitive) word overlap,
+    which is enough to test that reranking reorders candidates.
+    """
+
+    model_name = "fake-reranker"
+    loaded = True
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def score(self, query: str, passages: list[str]) -> list[float]:
+        self.calls.append((query, passages))
+        if self.error is not None:
+            raise self.error
+        query_words = set(re.findall(r"[\w.]+", query.lower()))
+        return [float(len(query_words & set(re.findall(r"[\w.]+", p.lower())))) for p in passages]
+
+
 def make_pdf(pages: list[str], first_page_label: int | None = None) -> bytes:
     """Build an in-memory PDF with one page per string ('' gives a blank page).
 
@@ -88,8 +110,11 @@ def app_factory(tmp_path, monkeypatch):
 
     from backend.main import create_app
 
-    def factory(llm_client=None):
-        return create_app(embedder=FakeEmbedder(), tokenizer=WhitespaceTokenizer(), llm_client=llm_client)
+    def factory(llm_client=None, reranker=None):
+        return create_app(
+            embedder=FakeEmbedder(), tokenizer=WhitespaceTokenizer(), llm_client=llm_client,
+            reranker=reranker or FakeReranker(),
+        )
 
     yield factory
     get_settings.cache_clear()

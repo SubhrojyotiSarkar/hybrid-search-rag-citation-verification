@@ -119,6 +119,7 @@ with st.sidebar:
         st.warning("Backend running, but retrieval is unavailable. Check the backend logs.")
     st.caption(f"Embedding model: {health['embedding_model']}")
     st.caption(f"Retrieval: {health['retrieval_mode']}")
+    st.caption(f"Reranker: {health['reranker_model']} ({'loaded' if health['reranker_loaded'] else 'loads on first use'})")
     st.caption(f"Indexed vectors: {health['indexed_vectors']} · BM25 chunks: {health['bm25_chunks']}")
     st.caption(f"LLM: {health['llm_provider']} / {health['llm_model']}")
     if not health["llm_configured"]:
@@ -249,8 +250,9 @@ with retrieval_tab:
             query = st.text_input("Query")
             col_mode, col_k, col_docs = st.columns([2, 1, 3])
             mode = col_mode.radio(
-                "Retriever", ["hybrid", "dense", "bm25", "compare all"], horizontal=True,
-                help="Hybrid fuses dense and BM25 rankings with Reciprocal Rank Fusion.",
+                "Retriever", ["hybrid", "hybrid_rerank", "dense", "bm25", "compare all"], horizontal=True,
+                help="Hybrid fuses dense and BM25 rankings with Reciprocal Rank Fusion; "
+                     "hybrid_rerank reorders hybrid's candidates with a cross-encoder (slower).",
             )
             top_k = col_k.number_input("Top-k", min_value=1, max_value=50, value=5)
             selected = col_docs.multiselect(
@@ -268,12 +270,14 @@ with retrieval_tab:
             return None
 
         if run_search and query.strip() and mode == "compare all":
-            columns = st.columns(3)
-            for column, retriever in zip(columns, ["dense", "bm25", "hybrid"]):
+            columns = st.columns(4)
+            for column, retriever in zip(columns, ["dense", "bm25", "hybrid", "hybrid_rerank"]):
                 body = run(retriever)
                 if body is None:
                     continue
-                column.markdown(f"**{retriever}** · {body['latency_ms']} ms")
+                served_by = body["results"][0]["retriever"] if body["results"] else retriever
+                fallback = " ⚠️ reranker failed, showing hybrid order" if served_by != retriever else ""
+                column.markdown(f"**{retriever}** · {body['latency_ms']} ms{fallback}")
                 for result in body["results"]:
                     chunk = result["chunk"]
                     column.markdown(f"#{result['rank']} · {page_display(chunk)} · `…{chunk['chunk_id'][-10:]}`")

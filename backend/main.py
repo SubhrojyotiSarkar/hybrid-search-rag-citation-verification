@@ -18,6 +18,7 @@ from backend.ingestion.pipeline import reconcile_index
 from backend.retrieval.bm25_search import BM25Index
 from backend.retrieval.embeddings import Embedder, SentenceTransformerEmbedder
 from backend.retrieval.hybrid_search import RetrievalServices
+from backend.retrieval.reranker import CrossEncoderReranker, Reranker
 from backend.retrieval.vector_store import FaissVectorStore
 from backend.schemas import HealthResponse
 from backend.storage.database import Database
@@ -31,6 +32,7 @@ def create_app(
     embedder: Embedder | None = None,
     tokenizer: Tokenizer | None = None,
     llm_client: LLMClient | None = None,
+    reranker: Reranker | None = None,
 ) -> FastAPI:
     """Build the app. Tests pass lightweight fakes; production loads the real models."""
 
@@ -61,7 +63,11 @@ def create_app(
             bm25_index = BM25Index(settings.bm25_k1, settings.bm25_b)
             bm25_index.add(repository.indexed_chunk_texts())
             logger.info("BM25 index built over %d chunks", bm25_index.count)
-            app.state.retrieval = RetrievalServices(active_embedder, store, bm25_index)
+            # Lazy: the cross-encoder loads on the first reranked query, not at startup.
+            active_reranker = reranker or CrossEncoderReranker(
+                settings.reranker_model_name, settings.reranker_batch_size
+            )
+            app.state.retrieval = RetrievalServices(active_embedder, store, bm25_index, active_reranker)
         except Exception:
             logger.exception("Retrieval is unavailable: embedding model or index failed to load")
 
@@ -101,6 +107,8 @@ def create_app(
             retrieval_mode=settings.retrieval_mode,
             indexed_vectors=retrieval.vector_store.count if retrieval else 0,
             bm25_chunks=retrieval.bm25_index.count if retrieval else 0,
+            reranker_model=settings.reranker_model_name,
+            reranker_loaded=bool(retrieval and getattr(retrieval.reranker, "loaded", True)),
             llm_provider=settings.llm_provider,
             llm_model=settings.llm_model,
             llm_configured=request.app.state.llm is not None,

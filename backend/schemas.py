@@ -27,6 +27,8 @@ class HealthResponse(BaseModel):
     retrieval_mode: str
     indexed_vectors: int
     bm25_chunks: int
+    reranker_model: str
+    reranker_loaded: bool  # False until the first reranked query (lazy loading)
     llm_provider: str
     llm_model: str
     llm_configured: bool
@@ -85,17 +87,18 @@ class DocumentRecord(BaseModel):
     updated_at: str
 
 
-RetrievalMode = Literal["dense", "bm25", "hybrid"]
+RetrievalMode = Literal["dense", "bm25", "hybrid", "hybrid_rerank"]
 
 
 class RetrievedChunk(BaseModel):
     chunk: Chunk
-    # Retriever-specific: cosine similarity (dense), BM25 score (bm25), RRF score (hybrid).
+    # Retriever-specific: cosine similarity (dense), BM25 score (bm25), RRF score (hybrid),
+    # cross-encoder logit (hybrid_rerank; unbounded, higher = more relevant).
     score: float
     rank: int = Field(ge=1)
     retriever: str
-    # Hybrid only: each component retriever's rank and score for this chunk. A retriever
-    # that did not return the chunk is absent.
+    # Hybrid: each component retriever's rank and score for this chunk (a retriever that did
+    # not return it is absent). Reranked results also include the pre-rerank "hybrid" entry.
     component_ranks: dict[str, int] = Field(default_factory=dict)
     component_scores: dict[str, float] = Field(default_factory=dict)
 
