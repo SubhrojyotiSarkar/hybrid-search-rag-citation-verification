@@ -38,6 +38,30 @@ class LLMResult(Generic[SchemaT]):
     latency_ms: float
 
 
+@dataclass
+class LLMUsage:
+    """Totals over every LLM call made while answering one question."""
+
+    calls: int = 0
+    verification_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    generation_ms: float = 0.0
+    verification_ms: float = 0.0
+    model: str | None = None  # model that produced the (first) answer
+
+    def add(self, result: "LLMResult", stage: str) -> None:
+        self.calls += 1
+        self.input_tokens += result.input_tokens
+        self.output_tokens += result.output_tokens
+        if stage == "verification":
+            self.verification_calls += 1
+            self.verification_ms += result.latency_ms
+        else:
+            self.generation_ms += result.latency_ms
+            self.model = self.model or result.model
+
+
 class LLMClient(Protocol):
     model: str
 

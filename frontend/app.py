@@ -16,12 +16,15 @@ STATUS_ICONS = {"processing": "⏳", "chunked": "🧩", "indexed": "✅", "faile
 
 # One distinct presentation per overall status: never a single green "verified" for all.
 OVERALL_STATUS_DISPLAY = {
-    "unverified": ("warning", "Unverified: citations are attached but have not been checked yet. "
-                              "Citation verification is added in Phase 4."),
-    "insufficient_evidence": ("info", "Not enough evidence in the selected documents to answer."),
-    "verified_within_provided_evidence": ("success", "Every claim was checked against its cited passages."),
-    "contains_unresolved_claims": ("warning", "Some claims are not supported by their citations."),
-    "verification_failed": ("error", "Verification could not be completed due to a technical error."),
+    "unverified": ("warning", "Unverified: citations are attached but were not checked "
+                              "(verification is disabled)."),
+    "insufficient_evidence": ("info", "Not enough verifiable evidence in the selected documents to answer."),
+    "verified_within_provided_evidence": ("success", "Every claim shown was checked against its cited "
+                                                     "passages. This means the documents support it, not "
+                                                     "that it is true in general."),
+    "contains_unresolved_claims": ("warning", "Some claims are not supported by their citations (marked below)."),
+    "verification_failed": ("error", "Verification could not be completed due to a technical error. "
+                                     "The claims below have NOT been checked."),
 }
 CLAIM_STATUS_ICONS = {
     "unverified": "◻️", "supported": "✅", "contradicted": "❌",
@@ -55,6 +58,32 @@ def pdf_link(document_id: str, page_number: int) -> str:
     return f"{BACKEND_URL}/api/documents/{document_id}/file#page={page_number}"
 
 
+SUPPORT_MARKS = {True: "✅ supports", False: "✖ does not support", None: ""}
+
+
+def render_claim(claim: dict) -> None:
+    icon = CLAIM_STATUS_ICONS.get(claim["verification_status"], "")
+    attempt = f" · attempt {claim['attempt']}" if claim.get("attempt", 1) > 1 else ""
+    st.markdown(f"{icon} **{claim['text']}**  \n*Status: {claim['verification_status']}{attempt}*")
+    if claim.get("verification_reason"):
+        st.caption(f"Verifier: {claim['verification_reason']}")
+    if claim.get("evidence_quote"):
+        st.caption(f'Evidence quote (checked to occur in the passage): "{claim["evidence_quote"]}"')
+    for citation in claim["citations"]:
+        mark = SUPPORT_MARKS.get(citation.get("supports_claim"), "")
+        st.markdown(
+            f"&nbsp;&nbsp;**[{citation['source_label']}]** {citation['filename']}, "
+            f"{page_display(citation)} · [open PDF]({pdf_link(citation['document_id'], citation['page_number'])})"
+            + (f" · {mark}" if mark else "")
+        )
+        st.caption(citation["snippet"])
+    if claim["invalid_source_labels"]:
+        st.error(f"Cited sources that do not exist: {', '.join(claim['invalid_source_labels'])}")
+    if not claim["citations"]:
+        st.warning("This claim has no valid citation.")
+    st.divider()
+
+
 def render_answer(response: dict) -> None:
     level, message = OVERALL_STATUS_DISPLAY.get(response["overall_status"], ("info", response["overall_status"]))
     getattr(st, level)(message)
@@ -63,19 +92,29 @@ def render_answer(response: dict) -> None:
     if response["claims"]:
         with st.expander(f"Claims and citations ({len(response['claims'])})", expanded=True):
             for claim in response["claims"]:
-                icon = CLAIM_STATUS_ICONS.get(claim["verification_status"], "")
-                st.markdown(f"{icon} **{claim['text']}**  \n*Status: {claim['verification_status']}*")
-                for citation in claim["citations"]:
-                    st.markdown(
-                        f"&nbsp;&nbsp;**[{citation['source_label']}]** {citation['filename']}, "
-                        f"{page_display(citation)} · [open PDF]({pdf_link(citation['document_id'], citation['page_number'])})"
-                    )
-                    st.caption(citation["snippet"])
-                if claim["invalid_source_labels"]:
-                    st.error(f"Cited sources that do not exist: {', '.join(claim['invalid_source_labels'])}")
-                if not claim["citations"]:
-                    st.warning("This claim has no valid citation.")
-                st.divider()
+                render_claim(claim)
+
+    removed = response.get("removed_claims") or []
+    if removed:
+        with st.expander(f"Removed claims ({len(removed)}): not supported by their citations"):
+            for claim in removed:
+                render_claim(claim)
+
+    verification = response.get("verification") or {}
+    if verification.get("enabled"):
+        parts = [f"verification: {verification['supported']} supported"]
+        if verification.get("removed"):
+            parts.append(f"{verification['removed']} removed")
+        if verification.get("unresolved"):
+            parts.append(f"{verification['unresolved']} unresolved")
+        if verification.get("failed"):
+            parts.append(f"{verification['failed']} failed")
+        if verification.get("quote_check_downgrades"):
+            parts.append(f"{verification['quote_check_downgrades']} verdict(s) rejected by the quote check")
+        parts.append(f"{verification['attempts']} generation attempt(s)")
+        st.caption(" · ".join(parts))
+        if verification.get("error"):
+            st.warning(f"Verification issue: {verification['error']}")
 
     if response["sources"]:
         with st.expander(f"All passages given to the model ({len(response['sources'])})"):
@@ -91,7 +130,10 @@ def render_answer(response: dict) -> None:
     meta = response["metadata"]
     parts = [f"retriever: {meta['retriever']} (top {meta['top_k']})", f"retrieval {meta['retrieval_ms']:.0f} ms"]
     if meta.get("llm_model"):
-        parts += [f"model: {meta['llm_model']}", f"generation {meta['generation_ms']:.0f} ms",
+        parts += [f"model: {meta['llm_model']}", f"generation {meta['generation_ms']:.0f} ms"]
+        if meta.get("verification_ms") is not None:
+            parts.append(f"verification {meta['verification_ms']:.0f} ms")
+        parts += [f"LLM calls: {meta.get('llm_calls', 0)}",
                   f"tokens in/out: {meta['input_tokens']}/{meta['output_tokens']}"]
     parts.append(f"total {meta['total_ms']:.0f} ms")
     st.caption(" · ".join(parts))

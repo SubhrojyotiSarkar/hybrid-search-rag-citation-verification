@@ -20,6 +20,14 @@ ML_PDF = make_pdf(
 COOKING_PDF = make_pdf(["Knead the bread dough and let it rise for two hours."])
 
 
+@pytest.fixture(autouse=True)
+def generation_only(monkeypatch):
+    """These tests cover generation and the API contract; verification is tested in
+    tests/test_verification_flow.py."""
+    monkeypatch.setenv("VERIFICATION_ENABLED", "false")
+    get_settings.cache_clear()
+
+
 def answer_citing_first_source(user_prompt: str) -> GeneratedAnswer:
     first_label = re.search(r'label="(S\d+)"', user_prompt).group(1)
     return GeneratedAnswer(

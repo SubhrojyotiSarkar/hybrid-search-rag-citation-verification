@@ -13,24 +13,41 @@ FAKE_API_KEY = "sk-test-not-a-real-key"
 
 
 class FakeLLM:
-    """Scripted LLM: returns `output` (or output(user_prompt) if callable), or raises `error`.
+    """Scripted LLM with separate scripts for generation and verification calls.
 
-    Records every call so tests can inspect the prompts that were sent.
+    `output` answers GeneratedAnswer requests and `verification` answers
+    GeneratedVerification requests. Each may be a value, a callable(user_prompt), or a list
+    consumed one item per call (for multi-attempt flows). `error` / `verification_error`
+    raise instead. Like the real client, returning the wrong schema raises
+    LLMError("llm_invalid_output"). Every call is recorded for inspection.
     """
 
     model = "fake-llm"
 
-    def __init__(self, output=None, error: Exception | None = None) -> None:
-        self.output = output
-        self.error = error
+    def __init__(self, output=None, error: Exception | None = None,
+                 verification=None, verification_error: Exception | None = None) -> None:
+        self.scripts = {"generation": output, "verification": verification}
+        self.errors = {"generation": error, "verification": verification_error}
         self.calls: list[dict] = []
 
     def generate_structured(self, system, user, schema, max_tokens=None):
-        self.calls.append({"system": system, "user": user, "schema": schema})
-        if self.error is not None:
-            raise self.error
-        output = self.output(user) if callable(self.output) else self.output
+        from backend.generation.llm_client import LLMError
+        from backend.schemas import GeneratedVerification
+
+        stage = "verification" if schema is GeneratedVerification else "generation"
+        self.calls.append({"system": system, "user": user, "schema": schema, "stage": stage})
+        if self.errors[stage] is not None:
+            raise self.errors[stage]
+        script = self.scripts[stage]
+        if isinstance(script, list):
+            script = script.pop(0) if len(script) > 1 else script[0]
+        output = script(user) if callable(script) else script
+        if not isinstance(output, schema):
+            raise LLMError("llm_invalid_output", "The LLM returned output in an unexpected format.")
         return LLMResult(output=output, model=self.model, input_tokens=120, output_tokens=40, latency_ms=5.0)
+
+    def stage_calls(self, stage: str) -> list[dict]:
+        return [call for call in self.calls if call["stage"] == stage]
 
 
 class WhitespaceTokenizer:

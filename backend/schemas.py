@@ -171,6 +171,9 @@ class Citation(BaseModel):
     page_number: int
     page_label: str | None = None
     snippet: str
+    # Set by the verifier: whether this particular cited passage supports the claim
+    # (None = not verified). A claim can cite several passages; not all need to support it.
+    supports_claim: bool | None = None
 
 
 class Claim(BaseModel):
@@ -181,6 +184,43 @@ class Claim(BaseModel):
     invalid_source_labels: list[str] = Field(default_factory=list)
     verification_status: VerificationStatus = VerificationStatus.UNVERIFIED
     verification_reason: str | None = None
+    # Exact excerpt from a cited passage that the verifier relied on, checked by code to
+    # really occur in that passage. None when not verified or no evidence was found.
+    evidence_quote: str | None = None
+    # True if the verifier's verdict was rejected because its quote was not in the passage.
+    quote_check_failed: bool = False
+    attempt: int = 1  # which generation attempt produced this claim
+
+
+class GeneratedVerdict(BaseModel):
+    """One verdict as returned by the verifier LLM (validated further in code)."""
+
+    claim_id: str
+    verdict: Literal["supported", "contradicted", "insufficient_evidence"]
+    supporting_source_labels: list[str] = Field(
+        description="Labels of this claim's cited passages that support it; empty if none do."
+    )
+    evidence_quote: str = Field(
+        description="Exact excerpt (max ~30 words) from one cited passage showing support or "
+                    "contradiction; empty string for insufficient_evidence."
+    )
+    explanation: str = Field(description="One or two sentences explaining the verdict.")
+
+
+class GeneratedVerification(BaseModel):
+    verdicts: list[GeneratedVerdict]
+
+
+class VerificationSummary(BaseModel):
+    enabled: bool
+    attempts: int = 0  # generation attempts made (1 + recovery attempts used)
+    supported: int = 0
+    removed: int = 0  # unsupported claims removed from the answer (policy "remove")
+    unresolved: int = 0  # unsupported claims kept and flagged (policy "flag")
+    failed: int = 0  # claims whose verification failed technically
+    quote_check_downgrades: int = 0
+    policy: str = "remove"
+    error: str | None = None  # technical problem during verification or recovery, if any
 
 
 class SourcePassage(BaseModel):
@@ -197,9 +237,11 @@ class ProcessingMetadata(BaseModel):
     top_k: int
     llm_model: str | None = None
     retrieval_ms: float
-    generation_ms: float | None = None
+    generation_ms: float | None = None  # summed over generation attempts
+    verification_ms: float | None = None  # summed over verification calls
     total_ms: float
-    input_tokens: int | None = None
+    llm_calls: int = 0
+    input_tokens: int | None = None  # totals over all LLM calls for this question
     output_tokens: int | None = None
 
 
@@ -218,7 +260,11 @@ class AskResponse(BaseModel):
     answer: str
     answer_status: AnswerStatus
     missing_information: str
-    claims: list[Claim]
+    claims: list[Claim]  # the claims shown in the answer
+    # Claims removed because verification found them unsupported or contradicted; kept
+    # here (with verdicts and reasons) so removals are transparent.
+    removed_claims: list[Claim] = Field(default_factory=list)
     sources: list[SourcePassage]
     overall_status: OverallStatus
+    verification: VerificationSummary = Field(default_factory=lambda: VerificationSummary(enabled=False))
     metadata: ProcessingMetadata

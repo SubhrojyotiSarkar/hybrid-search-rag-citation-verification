@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     rerank_candidates: int = Field(default=30, gt=0, le=100)
     reranker_batch_size: int = Field(default=32, gt=0)
 
+    # Citation verification (one extra LLM call per answer; recovery adds up to 2 per attempt).
+    verification_enabled: bool = True
+    # Regenerate (with more evidence and the verifier's feedback) at most this many times.
+    max_recovery_attempts: int = Field(default=1, ge=0, le=2)
+    # Passages retrieved for a recovery attempt (more evidence than the first attempt).
+    recovery_top_k: int = Field(default=12, gt=0, le=50)
+    # "remove": unsupported claims are dropped from the answer (and listed separately);
+    # "flag": they stay in the answer, marked, and the answer is "contains_unresolved_claims".
+    unsupported_claim_policy: Literal["remove", "flag"] = "remove"
+    verification_max_claims_per_call: int = Field(default=10, gt=0)
+
     # LLM provider (Google Gemini). The key is a SecretStr so it never appears in logs.
     llm_provider: str = "gemini"
     gemini_api_key: SecretStr | None = None
