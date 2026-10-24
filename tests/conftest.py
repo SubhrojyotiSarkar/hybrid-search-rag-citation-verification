@@ -121,6 +121,7 @@ def make_pdf(pages: list[str], first_page_label: int | None = None) -> bytes:
 def app_factory(tmp_path, monkeypatch):
     """Build apps that share one temp data directory, so a test can simulate a restart."""
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("EVALUATION_DIR", str(tmp_path / "evaluation"))
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", FAKE_API_KEY)
     get_settings.cache_clear()

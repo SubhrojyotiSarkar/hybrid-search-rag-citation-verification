@@ -9,6 +9,8 @@ import os
 import httpx
 import streamlit as st
 
+from evaluation_view import render_evaluation_tab  # sibling module (Streamlit adds this folder to sys.path)
+
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 UPLOAD_TIMEOUT_SECONDS = 300.0
 ASK_TIMEOUT_SECONDS = 180.0
@@ -172,7 +174,9 @@ st.title("Hybrid-Search RAG with Citation Verification")
 list_response = api_request("GET", "/api/documents", timeout=10.0)
 documents = list_response.json() if list_response is not None and list_response.is_success else []
 
-ask_tab, documents_tab, retrieval_tab = st.tabs(["Ask", "Documents", "Retrieval inspector"])
+ask_tab, documents_tab, retrieval_tab, evaluation_tab = st.tabs(
+    ["Ask", "Documents", "Retrieval inspector", "Evaluation"]
+)
 indexed = {doc["document_id"]: doc["filename"] for doc in documents if doc["status"] == "indexed"}
 
 # ---- Ask tab ------------------------------------------------------------------------------
@@ -351,3 +355,7 @@ with retrieval_tab:
                         st.caption(f"Table context (used for search, not part of the cited text): {chunk['context']}")
                     st.text(chunk["text"])
                     st.divider()
+
+# ---- Evaluation tab ---------------------------------------------------------------------------
+with evaluation_tab:
+    render_evaluation_tab(api_request, error_message, page_display)

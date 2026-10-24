@@ -127,6 +127,8 @@ def test_http_errors_are_classified(status, error_status, message, code, retryab
         llm.generate_structured("s", "u", GeneratedAnswer)
     assert excinfo.value.code == code
     assert excinfo.value.retryable is retryable
+    # The provider's message is kept for diagnosis (e.g. which quota was exceeded).
+    assert message in excinfo.value.detail
 
 
 def test_connection_failure_is_reported_as_unavailable():

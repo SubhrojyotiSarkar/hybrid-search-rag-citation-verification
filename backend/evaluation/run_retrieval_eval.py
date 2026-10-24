@@ -84,6 +84,81 @@ def summarize(name: str, results: list[QuestionResult], ks: list[int], depth: in
     return row
 
 
+def build_configs(modes: list[str], pools: list[int], rrf_ks: list[int], rerank_sizes: list[int]) -> list[tuple[str, str, dict]]:
+    configs: list[tuple[str, str, dict]] = []
+    for mode in modes:
+        if mode == "hybrid":
+            for pool in pools:
+                for k in rrf_ks:
+                    configs.append((f"hybrid(pool={pool},k={k})", mode,
+                                    {"hybrid_candidates_per_retriever": pool, "rrf_k": k}))
+        elif mode == "hybrid_rerank":
+            for size in rerank_sizes:
+                configs.append((f"hybrid_rerank(candidates={size})", mode, {"rerank_candidates": size}))
+        else:
+            configs.append((mode, mode, {}))
+    return configs
+
+
+def execute_retrieval_eval(
+    services, repository, settings, dataset: Path, configs: list[tuple[str, str, dict]],
+    depth: int = 20, ks: list[int] | None = None, progress=None,
+) -> dict:
+    """Evaluate each configuration on the dataset; returns the run record (not saved).
+    `progress(done, total)` is called after each configuration, if given."""
+    from backend.retrieval.hybrid_search import build_retriever
+
+    ks = ks or [1, 3, 5, 8, 10]
+    questions = load_dataset(dataset)
+    usable, problems = validate_against_index(questions, repository)
+    rows, per_question, fallbacks = [], {}, []
+    for done, (name, mode, overrides) in enumerate(configs, start=1):
+        retriever = build_retriever(mode, services, repository, settings.model_copy(update=overrides))
+        if usable:
+            retriever.search(usable[0][0].question, depth)  # warm-up (loads lazy models)
+        results, latencies = [], []
+        for q, doc_id in usable:
+            started = time.perf_counter()
+            retrieved = retriever.search(q.question, depth)
+            latencies.append((time.perf_counter() - started) * 1000)
+            # A reranker failure falls back to first-stage order under the first-stage name.
+            if retrieved and retrieved[0].retriever != retriever.name:
+                fallbacks.append(f"{name}/{q.id}: served by '{retrieved[0].retriever}' (fallback)")
+            results.append(score_question(q, doc_id, retrieved))
+        rows.append(summarize(name, results, ks, depth, latencies))
+        per_question[name] = {r.question_id: r.first_relevant_rank for r in results}
+        if progress:
+            progress(done, len(configs))
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return {
+        "run_id": f"retrieval_{stamp}", "kind": "retrieval", "timestamp": stamp, "git": _git_revision(),
+        "dataset": {"path": str(dataset.relative_to(PROJECT_ROOT)) if dataset.is_relative_to(PROJECT_ROOT) else str(dataset),
+                    "fingerprint": fingerprint(dataset), "questions": len(questions),
+                    "evaluated": len(usable), "reviewed": sum(1 for q, _ in usable if q.reviewed), "excluded": problems},
+        "settings": {
+            "embedding_model": settings.embedding_model_name,
+            "chunk_size_tokens": settings.chunk_size_tokens,
+            "chunk_overlap_tokens": settings.chunk_overlap_tokens,
+            "bm25_k1": settings.bm25_k1, "bm25_b": settings.bm25_b, "depth": depth, "ks": ks,
+            "reranker_model": settings.reranker_model_name,
+        },
+        "fallbacks": fallbacks,
+        "configs": [{"name": name, "mode": mode, "overrides": overrides} for name, mode, overrides in configs],
+        "summary": rows,
+        "first_relevant_rank": per_question,
+    }
+
+
+def save_run(record: dict, out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{record['run_id']}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
@@ -101,94 +176,38 @@ def main(argv: list[str] | None = None) -> int:
     from fastapi.testclient import TestClient
 
     from backend.main import create_app
-    from backend.retrieval.hybrid_search import build_retriever
     from backend.storage.repositories import DocumentRepository
 
-    questions = load_dataset(args.dataset)
     settings = get_settings()
-    ks = _ints(args.ks)
-    pools = _ints(args.pool) if args.pool else [settings.hybrid_candidates_per_retriever]
-    rrf_ks = _ints(args.rrf_k) if args.rrf_k else [settings.rrf_k]
-    rerank_sizes = _ints(args.rerank_candidates) if args.rerank_candidates else [settings.rerank_candidates]
-
+    configs = build_configs(
+        args.modes.split(","),
+        _ints(args.pool) if args.pool else [settings.hybrid_candidates_per_retriever],
+        _ints(args.rrf_k) if args.rrf_k else [settings.rrf_k],
+        _ints(args.rerank_candidates) if args.rerank_candidates else [settings.rerank_candidates],
+    )
     app = create_app()
     with TestClient(app):  # runs startup: loads models, reconciles and builds the indexes
-        services = app.state.retrieval
-        if services is None:
+        if app.state.retrieval is None:
             print("Retrieval is unavailable; check the backend logs.", file=sys.stderr)
             return 1
-        repository = DocumentRepository(app.state.db)
-        usable, problems = validate_against_index(questions, repository)
+        record = execute_retrieval_eval(app.state.retrieval, DocumentRepository(app.state.db), settings,
+                                        args.dataset, configs, args.depth, _ints(args.ks))
 
-        configs: list[tuple[str, str, dict]] = []
-        for mode in args.modes.split(","):
-            if mode == "hybrid":
-                for pool in pools:
-                    for k in rrf_ks:
-                        configs.append((f"hybrid(pool={pool},k={k})", mode,
-                                        {"hybrid_candidates_per_retriever": pool, "rrf_k": k}))
-            elif mode == "hybrid_rerank":
-                for size in rerank_sizes:
-                    configs.append((f"hybrid_rerank(candidates={size})", mode, {"rerank_candidates": size}))
-            else:
-                configs.append((mode, mode, {}))
-
-        rows, per_question, fallbacks = [], {}, []
-        for name, mode, overrides in configs:
-            retriever = build_retriever(mode, services, repository, settings.model_copy(update=overrides))
-            if usable:
-                retriever.search(usable[0][0].question, args.depth)  # warm-up (loads lazy models)
-            results, latencies = [], []
-            for q, doc_id in usable:
-                started = time.perf_counter()
-                retrieved = retriever.search(q.question, args.depth)
-                latencies.append((time.perf_counter() - started) * 1000)
-                # A reranker failure falls back to first-stage order under the first-stage name.
-                if retrieved and retrieved[0].retriever != retriever.name:
-                    fallbacks.append(f"{name}/{q.id}: served by '{retrieved[0].retriever}' (fallback)")
-                results.append(score_question(q, doc_id, retrieved))
-            rows.append(summarize(name, results, ks, args.depth, latencies))
-            per_question[name] = {r.question_id: r.first_relevant_rank for r in results}
-
-    table = pd.DataFrame(rows).set_index("config")
-    ranks = pd.DataFrame(per_question).T
-    reviewed = sum(1 for q, _ in usable if q.reviewed)
-    print(f"\nDataset: {args.dataset.name} ({fingerprint(args.dataset)}) | {len(questions)} questions, "
-          f"{len(usable)} evaluated ({reviewed} human-reviewed)")
-    for problem in problems:
+    data = record["dataset"]
+    print(f"\nDataset: {args.dataset.name} ({data['fingerprint']}) | {data['questions']} questions, "
+          f"{data['evaluated']} evaluated ({data['reviewed']} human-reviewed)")
+    for problem in data["excluded"]:
         print(f"  EXCLUDED {problem}")
-    for fallback in fallbacks:
+    for fallback in record["fallbacks"]:
         print(f"  FALLBACK {fallback}")
-    print("\n" + table.to_string())
+    print("\n" + pd.DataFrame(record["summary"]).set_index("config").to_string())
     print("\nRank of first relevant chunk per question (blank = not in top "
-          f"{args.depth}):\n" + ranks.to_string(na_rep=""))
-    if len(usable) < MIN_QUESTIONS_FOR_CONCLUSIONS:
-        print(f"\nWARNING: only {len(usable)} evaluated question(s). Differences between configurations "
+          f"{args.depth}):\n" + pd.DataFrame(record["first_relevant_rank"]).T.to_string(na_rep=""))
+    if data["evaluated"] < MIN_QUESTIONS_FOR_CONCLUSIONS:
+        print(f"\nWARNING: only {data['evaluated']} evaluated question(s). Differences between configurations "
               f"are anecdotal below about {MIN_QUESTIONS_FOR_CONCLUSIONS}; do not change defaults based on this run.")
-
     if not args.no_save:
-        args.out.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        record = {
-            "timestamp": stamp,
-            "git": _git_revision(),
-            "dataset": {"path": str(args.dataset.relative_to(PROJECT_ROOT)) if args.dataset.is_relative_to(PROJECT_ROOT) else str(args.dataset),
-                        "fingerprint": fingerprint(args.dataset), "questions": len(questions),
-                        "evaluated": len(usable), "reviewed": reviewed, "excluded": problems},
-            "settings": {
-                "embedding_model": settings.embedding_model_name,
-                "chunk_size_tokens": settings.chunk_size_tokens,
-                "chunk_overlap_tokens": settings.chunk_overlap_tokens,
-                "bm25_k1": settings.bm25_k1, "bm25_b": settings.bm25_b, "depth": args.depth,
-                "reranker_model": settings.reranker_model_name,
-            },
-            "fallbacks": fallbacks,
-            "configs": [{"name": name, "mode": mode, "overrides": overrides} for name, mode, overrides in configs],
-            "summary": rows,
-            "first_relevant_rank": per_question,
-        }
-        path = args.out / f"retrieval_{stamp}.json"
-        path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+        path = save_run(record, args.out)
         print(f"\nSaved {path.relative_to(PROJECT_ROOT) if path.is_relative_to(PROJECT_ROOT) else path}")
     return 0
 

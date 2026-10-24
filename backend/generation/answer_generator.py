@@ -231,6 +231,9 @@ class AnswerGenerator:
         self.top_k = top_k
         self.verifier = verifier  # backend.verification.citation_verifier.CitationVerifier or None
         self.recovery = recovery or RecoveryConfig()
+        # Every attempt of the most recent answer() call, including superseded ones. The
+        # evaluation runner uses it to compare claims before and after verification.
+        self.last_attempts: list[Attempt] = []
 
     # ---- steps ---------------------------------------------------------------------------
 
@@ -267,6 +270,7 @@ class AnswerGenerator:
         started = time.perf_counter()
         timings = _Timings()
         usage = LLMUsage()
+        self.last_attempts = []
         passages = self.retrieve(question, self.top_k, document_ids, timings)
 
         if not passages:
@@ -277,6 +281,7 @@ class AnswerGenerator:
                                   VerificationSummary(enabled=self.verifier is not None), timings, usage, started)
 
         first = self.generate(question, passages, 1, usage)
+        self.last_attempts = [first]
         if not first.claims:
             return self._response(question, first, [], OverallStatus.INSUFFICIENT_EVIDENCE,
                                   VerificationSummary(enabled=self.verifier is not None, attempts=1),
@@ -288,6 +293,12 @@ class AnswerGenerator:
         from backend.verification.recovery import finalize, run_recovery
 
         attempts, recovery_error = run_recovery(self, question, document_ids, first, usage, timings)
+        # Snapshot before finalize() narrows the chosen attempt to its kept claims.
+        self.last_attempts = [
+            Attempt(a.number, a.passages, [c.model_copy(deep=True) for c in a.claims], a.answer_status,
+                    a.missing_information, a.verified, a.quote_check_downgrades, a.error)
+            for a in attempts
+        ]
         return finalize(self, question, attempts, recovery_error, timings, usage, started)
 
     def _response(

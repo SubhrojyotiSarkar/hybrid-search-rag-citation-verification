@@ -10,8 +10,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
-from backend.api import chat, documents, search
+from backend.api import chat, documents, evaluation, search
 from backend.config import get_settings
+from backend.evaluation.jobs import JobManager
 from backend.generation.llm_client import LLMClient, create_llm_client
 from backend.ingestion.chunker import HuggingFaceTokenizer, Tokenizer
 from backend.ingestion.pipeline import reconcile_index
@@ -93,6 +94,8 @@ def create_app(
     app.include_router(documents.router)
     app.include_router(search.router)
     app.include_router(chat.router)
+    app.include_router(evaluation.router)
+    app.state.jobs = JobManager()  # background evaluation runs (one at a time)
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:

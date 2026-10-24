@@ -4,6 +4,10 @@
 # Generated data: uploads, indexes, SQLite database
 data/
 
+# Answer-evaluation runs contain passage text from your documents. Retrieval runs and
+# human reviews (evaluation/reviews/) contain no document text and are tracked.
+evaluation/results/answers_*.json
+
 # Python
 .venv/
 __pycache__/

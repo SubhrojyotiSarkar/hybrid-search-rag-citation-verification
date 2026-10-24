@@ -1,0 +1,130 @@
+{
+  "run_id": "retrieval_20261024T052226Z",
+  "kind": "retrieval",
+  "timestamp": "20261024T052226Z",
+  "git": "8b41246-dirty",
+  "dataset": {
+    "path": "evaluation\\datasets\\questions.jsonl",
+    "fingerprint": "42ce49e577d3d8e1",
+    "questions": 2,
+    "evaluated": 2,
+    "reviewed": 1,
+    "excluded": []
+  },
+  "settings": {
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "chunk_size_tokens": 220,
+    "chunk_overlap_tokens": 40,
+    "bm25_k1": 1.5,
+    "bm25_b": 0.75,
+    "depth": 20,
+    "ks": [
+      1,
+      3,
+      5,
+      8,
+      10
+    ],
+    "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  },
+  "fallbacks": [],
+  "configs": [
+    {
+      "name": "dense",
+      "mode": "dense",
+      "overrides": {}
+    },
+    {
+      "name": "bm25",
+      "mode": "bm25",
+      "overrides": {}
+    },
+    {
+      "name": "hybrid(pool=20,k=60)",
+      "mode": "hybrid",
+      "overrides": {
+        "hybrid_candidates_per_retriever": 20,
+        "rrf_k": 60
+      }
+    },
+    {
+      "name": "hybrid_rerank(candidates=30)",
+      "mode": "hybrid_rerank",
+      "overrides": {
+        "rerank_candidates": 30
+      }
+    }
+  ],
+  "summary": [
+    {
+      "config": "dense",
+      "n": 2,
+      "hit@1": 0.0,
+      "hit@3": 0.0,
+      "hit@5": 0.5,
+      "hit@8": 0.5,
+      "hit@10": 0.5,
+      "recall@10": 0.5,
+      "MRR@20": 0.1,
+      "mean_ms": 19.6,
+      "max_ms": 20.5
+    },
+    {
+      "config": "bm25",
+      "n": 2,
+      "hit@1": 1.0,
+      "hit@3": 1.0,
+      "hit@5": 1.0,
+      "hit@8": 1.0,
+      "hit@10": 1.0,
+      "recall@10": 1.0,
+      "MRR@20": 1.0,
+      "mean_ms": 3.1,
+      "max_ms": 3.3
+    },
+    {
+      "config": "hybrid(pool=20,k=60)",
+      "n": 2,
+      "hit@1": 0.5,
+      "hit@3": 0.5,
+      "hit@5": 0.5,
+      "hit@8": 0.5,
+      "hit@10": 1.0,
+      "recall@10": 1.0,
+      "MRR@20": 0.55,
+      "mean_ms": 23.1,
+      "max_ms": 23.5
+    },
+    {
+      "config": "hybrid_rerank(candidates=30)",
+      "n": 2,
+      "hit@1": 1.0,
+      "hit@3": 1.0,
+      "hit@5": 1.0,
+      "hit@8": 1.0,
+      "hit@10": 1.0,
+      "recall@10": 1.0,
+      "MRR@20": 1.0,
+      "mean_ms": 966.0,
+      "max_ms": 1043.5
+    }
+  ],
+  "first_relevant_rank": {
+    "dense": {
+      "q001": null,
+      "q002": 5
+    },
+    "bm25": {
+      "q001": 1,
+      "q002": 1
+    },
+    "hybrid(pool=20,k=60)": {
+      "q001": 10,
+      "q002": 1
+    },
+    "hybrid_rerank(candidates=30)": {
+      "q001": 1,
+      "q002": 1
+    }
+  }
+}

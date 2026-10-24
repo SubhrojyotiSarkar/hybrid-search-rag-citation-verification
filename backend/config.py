@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     unsupported_claim_policy: Literal["remove", "flag"] = "remove"
     verification_max_claims_per_call: int = Field(default=10, gt=0)
 
+    # Evaluation: datasets, run results and human reviews live under this folder.
+    evaluation_dir: Path = Path("evaluation")
+    # Pace answer-evaluation runs to the provider's per-minute request quota.
+    eval_requests_per_minute: int = Field(default=5, gt=0)
+
     # LLM provider (Google Gemini). The key is a SecretStr so it never appears in logs.
     llm_provider: str = "gemini"
     gemini_api_key: SecretStr | None = None
@@ -82,7 +87,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=16000, gt=0)
     llm_timeout_seconds: float = Field(default=120.0, gt=0)
 
-    @field_validator("data_dir")
+    @field_validator("data_dir", "evaluation_dir")
     @classmethod
     def _resolve_data_dir(cls, value: Path) -> Path:
         return value if value.is_absolute() else (PROJECT_ROOT / value).resolve()
@@ -100,6 +105,14 @@ class Settings(BaseSettings):
     @property
     def index_dir(self) -> Path:
         return self.data_dir / "indexes"
+
+    @property
+    def eval_results_dir(self) -> Path:
+        return self.evaluation_dir / "results"
+
+    @property
+    def eval_reviews_dir(self) -> Path:
+        return self.evaluation_dir / "reviews"
 
     @property
     def max_upload_bytes(self) -> int:

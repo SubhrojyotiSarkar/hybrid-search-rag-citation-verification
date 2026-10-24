@@ -22,11 +22,14 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 class LLMError(Exception):
     """A failed LLM call. `code` is stable and safe to show; details go to the logs only."""
 
-    def __init__(self, code: str, message: str, retryable: bool = False) -> None:
+    def __init__(self, code: str, message: str, retryable: bool = False, detail: str | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        # The provider's own message (e.g. which quota was exceeded). Recorded by the
+        # evaluation runner for diagnosis; never returned to chat users.
+        self.detail = detail
 
 
 @dataclass
@@ -60,6 +63,49 @@ class LLMUsage:
         else:
             self.generation_ms += result.latency_ms
             self.model = self.model or result.model
+
+
+class SlidingWindowRateLimiter:
+    """Allows at most `max_calls` per `period` seconds, sleeping until a slot frees up.
+
+    Used for long evaluation runs, so they stay under the provider's per-minute quota
+    (5 requests/minute on the Gemini free tier for gemini-3.8-flash at the time of writing)
+    instead of failing with 429 errors. `clock` and `sleep` are injectable for tests.
+    """
+
+    def __init__(self, max_calls: int, period: float = 60.0, clock=time.monotonic, sleep=time.sleep) -> None:
+        if max_calls <= 0:
+            raise ValueError("max_calls must be positive")
+        self.max_calls = max_calls
+        self.period = period
+        self.clock = clock
+        self.sleep = sleep
+        self._calls: list[float] = []
+        self.waited_seconds = 0.0
+
+    def acquire(self) -> None:
+        now = self.clock()
+        self._calls = [t for t in self._calls if now - t < self.period]
+        if len(self._calls) >= self.max_calls:
+            wait = self.period - (now - self._calls[0]) + 0.05
+            self.waited_seconds += wait
+            self.sleep(wait)
+            now = self.clock()
+            self._calls = [t for t in self._calls if now - t < self.period]
+        self._calls.append(now)
+
+
+class RateLimitedLLMClient:
+    """Wraps an LLMClient so every call first takes a slot from the rate limiter."""
+
+    def __init__(self, inner: "LLMClient", limiter: SlidingWindowRateLimiter) -> None:
+        self.inner = inner
+        self.limiter = limiter
+        self.model = inner.model
+
+    def generate_structured(self, system, user, schema, max_tokens=None):
+        self.limiter.acquire()
+        return self.inner.generate_structured(system, user, schema, max_tokens)
 
 
 class LLMClient(Protocol):
@@ -177,11 +223,18 @@ def _response_text(response) -> str:
 
 
 def _map_api_error(exc, model: str) -> LLMError:
-    """Translate a google-genai APIError into a stable LLMError code."""
+    """Translate a google-genai APIError into a stable LLMError code, keeping the provider's
+    message (truncated) as `detail`."""
+    logger.error("Gemini API error %s %s: %s", exc.code, exc.status, exc.message)
+    error = _classify_api_error(exc, model)
+    error.detail = f"{exc.code} {exc.status}: {exc.message}"[:500] if exc.message else None
+    return error
+
+
+def _classify_api_error(exc, model: str) -> LLMError:
     code = exc.code or 0
     status = (exc.status or "").upper()
     message = (exc.message or "").lower()
-    logger.error("Gemini API error %s %s: %s", code, status, exc.message)
     # Order matters: quota messages can mention the API key, so check 429 first.
     if code == 429 or status == "RESOURCE_EXHAUSTED":
         return LLMError(

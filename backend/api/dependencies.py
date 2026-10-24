@@ -9,13 +9,13 @@ from collections.abc import Callable
 from fastapi import Depends, HTTPException, Request
 
 from backend.config import get_settings
-from backend.generation.answer_generator import AnswerGenerator, RecoveryConfig
+from backend.generation.answer_generator import AnswerGenerator
+from backend.generation.factory import build_answer_generator
 from backend.generation.llm_client import LLMClient
 from backend.ingestion.pipeline import IngestionPipeline
 from backend.retrieval.hybrid_search import RetrievalServices, Retriever, build_retriever
 from backend.schemas import DocumentStatus
 from backend.storage.repositories import DocumentRepository
-from backend.verification.citation_verifier import CitationVerifier
 
 
 def api_error(status_code: int, code: str, message: str, document_id: str | None = None) -> HTTPException:
@@ -71,21 +71,11 @@ def get_llm_client(request: Request) -> LLMClient:
 
 
 def get_answer_generator(
-    retriever_factory: Callable[[str], Retriever] = Depends(get_retriever_factory),
+    repository: DocumentRepository = Depends(get_repository),
+    services: RetrievalServices = Depends(get_retrieval_services),
     llm: LLMClient = Depends(get_llm_client),
 ) -> AnswerGenerator:
-    settings = get_settings()
-    verifier = None
-    if settings.verification_enabled:
-        verifier = CitationVerifier(llm, settings.verification_max_claims_per_call)
-    recovery = RecoveryConfig(
-        max_attempts=settings.max_recovery_attempts,
-        recovery_top_k=settings.recovery_top_k,
-        policy=settings.unsupported_claim_policy,
-    )
-    return AnswerGenerator(
-        retriever_factory(settings.retrieval_mode), llm, settings.retrieval_top_k, verifier, recovery
-    )
+    return build_answer_generator(get_settings(), services, repository, llm)
 
 
 def validate_document_ids(document_ids: list[str] | None, repository: DocumentRepository) -> None:
