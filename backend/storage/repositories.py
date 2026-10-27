@@ -88,9 +88,16 @@ class DocumentRepository:
         page_count: int,
         empty_pages: list[int],
         metadata: dict[str, str],
+        replace: bool = False,
     ) -> None:
-        """Store all chunks and mark the document CHUNKED in a single transaction."""
+        """Store all chunks and mark the document CHUNKED in a single transaction.
+
+        replace=True first deletes the document's existing chunks in the same transaction
+        (re-processing): readers see either all old chunks or all new ones, never a mix.
+        """
         with self.db.connect() as conn:
+            if replace:
+                conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
             conn.executemany(
                 """INSERT INTO chunks
                    (chunk_id, document_id, chunk_index, page_number, page_label, start_char,

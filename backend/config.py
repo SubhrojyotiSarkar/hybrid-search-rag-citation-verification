@@ -22,7 +22,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_version: str = "0.1.0"
+    app_version: str = "1.0.0"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     # Storage. Relative paths are resolved against the project root, not the CWD,
     # so the backend finds the same data no matter where it is launched from.

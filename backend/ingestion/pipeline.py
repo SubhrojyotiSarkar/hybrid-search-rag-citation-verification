@@ -60,6 +60,14 @@ class EmbeddingFailedError(IngestionError):
     status_code = 500
 
 
+class DocumentNotFoundError(IngestionError):
+    status_code = 404
+
+
+class StoredFileMissingError(IngestionError):
+    status_code = 409
+
+
 def new_document_id() -> str:
     return f"doc_{uuid.uuid4().hex[:12]}"
 
@@ -138,6 +146,47 @@ class IngestionPipeline:
             raise
 
         logger.info("Ingested %s (%s): %d chunks", document_id, filename, len(chunks))
+        return self.repository.get(document_id)
+
+    def reprocess(self, document_id: str) -> DocumentRecord:
+        """Re-extract and re-chunk a stored document in place, keeping its document_id (so
+        citations, PDF links and evaluation records stay valid), e.g. after the chunking
+        logic changed.
+
+        The new chunks are built before anything is replaced: if extraction fails, the old
+        chunks stay searchable. Old and new chunks are swapped in one SQLite transaction;
+        if the process dies before the new vectors are added, startup reconciliation
+        embeds them.
+        """
+        document = self.repository.get(document_id)
+        if document is None:
+            raise DocumentNotFoundError("document_not_found", f"No document with id '{document_id}'.")
+        path = self.file_path(document_id)
+        if not path.is_file():
+            raise StoredFileMissingError(
+                "file_missing", "The stored PDF is missing; delete the document and upload it again.", document_id
+            )
+        try:
+            extraction = extract_pdf(path.read_bytes(), self.settings.min_page_chars)
+        except PDFExtractionError as exc:
+            raise ExtractionFailedError(exc.code, exc.message, document_id) from exc
+        if all(page.is_empty for page in extraction.pages):
+            raise ExtractionFailedError("no_extractable_text", "No extractable text found in the stored PDF.", document_id)
+        chunks = chunk_pages(
+            extraction.pages, document_id, document.filename, self.tokenizer,
+            self.settings.chunk_size_tokens, self.settings.chunk_overlap_tokens,
+        )
+
+        old_vector_ids = self.repository.vector_ids_for_document(document_id)
+        self.repository.save_chunks(
+            document_id, chunks, extraction.page_count, extraction.empty_page_numbers,
+            extraction.metadata, replace=True,
+        )
+        self.bm25_index.remove(old_vector_ids)
+        self.vector_store.remove(old_vector_ids)  # saved by _index_document below
+        self._index_document(document_id)
+        logger.info("Reprocessed %s (%s): %d -> %d chunks", document_id, document.filename,
+                    len(old_vector_ids), len(chunks))
         return self.repository.get(document_id)
 
     def _index_document(self, document_id: str) -> None:

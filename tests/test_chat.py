@@ -156,7 +156,10 @@ def test_llm_errors_map_to_clear_http_errors(make_client, code, status):
     response = ask(client, "What does L2 regularization do?")
 
     assert response.status_code == status
-    assert response.json()["detail"] == {"code": code, "message": "Readable message."}
+    detail = response.json()["detail"]
+    assert (detail["code"], detail["message"]) == (code, "Readable message.")
+    # Server-side (5xx) errors carry the request ID so they can be found in the logs.
+    assert ("request_id" in detail) == (status >= 500)
 
 
 def test_unexpected_errors_do_not_leak_details(make_client):

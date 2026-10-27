@@ -12,6 +12,9 @@ import streamlit as st
 from evaluation_view import render_evaluation_tab  # sibling module (Streamlit adds this folder to sys.path)
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+# The address the *browser* uses for "open PDF" links. Differs from BACKEND_URL in Docker,
+# where the frontend reaches the backend as http://backend:8000 but the browser cannot.
+PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", BACKEND_URL)
 UPLOAD_TIMEOUT_SECONDS = 300.0
 ASK_TIMEOUT_SECONDS = 180.0
 STATUS_ICONS = {"processing": "⏳", "chunked": "🧩", "indexed": "✅", "failed": "❌"}
@@ -42,9 +45,11 @@ def error_message(response: httpx.Response) -> str:
         detail = response.json().get("detail")
     except ValueError:
         detail = None
+    request_id = response.headers.get("X-Request-ID")
+    reference = f" (request ID {request_id} in the backend log)" if request_id and response.status_code >= 500 else ""
     if isinstance(detail, dict) and "message" in detail:
-        return detail["message"]
-    return f"Request failed (HTTP {response.status_code})."
+        return detail["message"] + reference
+    return f"Request failed (HTTP {response.status_code}).{reference}"
 
 
 def page_display(chunk: dict) -> str:
@@ -57,7 +62,7 @@ def page_display(chunk: dict) -> str:
 
 def pdf_link(document_id: str, page_number: int) -> str:
     """Opens the original PDF at the physical page (browsers support #page=N)."""
-    return f"{BACKEND_URL}/api/documents/{document_id}/file#page={page_number}"
+    return f"{PUBLIC_BACKEND_URL}/api/documents/{document_id}/file#page={page_number}"
 
 
 SUPPORT_MARKS = {True: "✅ supports", False: "✖ does not support", None: ""}
@@ -268,7 +273,17 @@ with documents_tab:
                 st.error(f"{doc['error_code']}: {doc['error_message']}")
             st.caption(f"Document ID: {doc['document_id']}")
 
-            col_chunks, col_delete = st.columns([1, 1])
+            col_chunks, col_reprocess, col_delete = st.columns([1, 1, 1])
+            if col_reprocess.button("Re-process", key=f"reprocess_{doc['document_id']}",
+                                    help="Re-extract and re-chunk the stored PDF with the current settings, "
+                                         "keeping the document ID. Use after changing chunking settings."):
+                with st.spinner("Re-processing..."):
+                    reprocess_response = api_request(
+                        "POST", f"/api/documents/{doc['document_id']}/reprocess", timeout=UPLOAD_TIMEOUT_SECONDS)
+                if reprocess_response is not None and reprocess_response.is_success:
+                    st.success(f"Re-processed: {reprocess_response.json()['chunk_count']} chunks.")
+                elif reprocess_response is not None:
+                    st.error(error_message(reprocess_response))
             if col_chunks.button("Show chunks", key=f"chunks_{doc['document_id']}"):
                 chunk_response = api_request("GET", f"/api/documents/{doc['document_id']}/chunks", timeout=10.0)
                 if chunk_response is not None and chunk_response.is_success:

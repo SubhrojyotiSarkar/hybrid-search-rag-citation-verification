@@ -1,0 +1,39 @@
+# Run from the project root:   docker compose up --build
+# Then open http://localhost:8501 (frontend). The API is on http://localhost:8000/docs.
+# The first start downloads ~200 MB of models into the model-cache volume.
+
+services:
+  backend:
+    build: .
+    env_file: .env                 # GEMINI_API_KEY etc.; never copied into the image
+    environment:
+      DATA_DIR: /app/data          # override relative paths from .env
+      EVALUATION_DIR: /app/evaluation
+    volumes:
+      - ./data:/app/data           # documents, SQLite, FAISS index (same as a local run)
+      - ./evaluation:/app/evaluation  # dataset, runs, human reviews (editable on the host)
+      - model-cache:/models
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s           # first start downloads the embedding model
+
+  frontend:
+    build: .
+    command: ["python", "-m", "streamlit", "run", "frontend/app.py",
+              "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+    environment:
+      BACKEND_URL: http://backend:8000          # container-to-container
+      PUBLIC_BACKEND_URL: http://localhost:8000 # what your browser uses for "open PDF" links
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  model-cache:

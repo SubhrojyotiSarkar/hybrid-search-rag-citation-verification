@@ -13,6 +13,7 @@ from backend.generation.answer_generator import AnswerGenerator
 from backend.generation.factory import build_answer_generator
 from backend.generation.llm_client import LLMClient
 from backend.ingestion.pipeline import IngestionPipeline
+from backend.logging_config import request_id_var
 from backend.retrieval.hybrid_search import RetrievalServices, Retriever, build_retriever
 from backend.schemas import DocumentStatus
 from backend.storage.repositories import DocumentRepository
@@ -23,6 +24,9 @@ def api_error(status_code: int, code: str, message: str, document_id: str | None
     detail = {"code": code, "message": message}
     if document_id:
         detail["document_id"] = document_id
+    if status_code >= 500:
+        # Lets a user report an error that can be matched to its log lines.
+        detail["request_id"] = request_id_var.get()
     return HTTPException(status_code=status_code, detail=detail)
 
 

@@ -5,13 +5,16 @@ Run from the project root:
 """
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from backend.api import chat, documents, evaluation, search
 from backend.config import get_settings
+from backend.logging_config import configure_logging, new_request_id, request_id_var
 from backend.evaluation.jobs import JobManager
 from backend.generation.llm_client import LLMClient, create_llm_client
 from backend.ingestion.chunker import HuggingFaceTokenizer, Tokenizer
@@ -25,8 +28,9 @@ from backend.schemas import HealthResponse
 from backend.storage.database import Database
 from backend.storage.repositories import DocumentRepository
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+configure_logging(get_settings().log_level)
 logger = logging.getLogger(__name__)
+access_logger = logging.getLogger("backend.access")
 
 
 def create_app(
@@ -89,13 +93,34 @@ def create_app(
         yield
 
     app = FastAPI(
-        title="Hybrid-Search RAG with Citation Verification", version="0.1.0", lifespan=lifespan
+        title="Hybrid-Search RAG with Citation Verification", version=get_settings().app_version, lifespan=lifespan
     )
     app.include_router(documents.router)
     app.include_router(search.router)
     app.include_router(chat.router)
     app.include_router(evaluation.router)
     app.state.jobs = JobManager()  # background evaluation runs (one at a time)
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        """Give every request an ID (logged on every line, returned in X-Request-ID), log one
+        access line with latency, and turn unhandled exceptions into a clean JSON 500."""
+        request_id = new_request_id(request.headers.get("X-Request-ID"))
+        token = request_id_var.set(request_id)
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            # Full details go to the log only; the client gets a stable code and the ID.
+            logger.exception("Unhandled error in %s %s", request.method, request.url.path)
+            response = JSONResponse(status_code=500, content={"detail": {
+                "code": "internal_error", "message": "An unexpected error occurred.", "request_id": request_id}})
+        duration_ms = (time.perf_counter() - started) * 1000
+        log = access_logger.debug if request.url.path == "/health" else access_logger.info
+        log("%s %s -> %d (%.0f ms)", request.method, request.url.path, response.status_code, duration_ms)
+        request_id_var.reset(token)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:

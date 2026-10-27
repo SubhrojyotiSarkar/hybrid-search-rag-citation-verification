@@ -57,6 +57,16 @@ def list_document_chunks(
     return repository.list_chunks(document_id)
 
 
+@router.post("/{document_id}/reprocess", response_model=DocumentRecord)
+def reprocess_document(document_id: str, pipeline: IngestionPipeline = Depends(get_pipeline)) -> DocumentRecord:
+    """Re-extract and re-chunk a stored PDF in place (same document_id), e.g. after the
+    chunking logic changed. If it fails, the existing chunks stay searchable."""
+    try:
+        return pipeline.reprocess(document_id)
+    except IngestionError as exc:
+        raise api_error(exc.status_code, exc.code, exc.message, exc.document_id) from exc
+
+
 @router.get("/{document_id}/file")
 def get_document_file(document_id: str, repository: DocumentRepository = Depends(get_repository)) -> FileResponse:
     """The original PDF, served inline so browsers can open it at a page (…/file#page=4)."""
