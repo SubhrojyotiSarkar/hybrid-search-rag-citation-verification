@@ -268,7 +268,7 @@ def render_answer_metrics(run: dict) -> None:
 
 # ---- review -----------------------------------------------------------------------------------
 
-def render_review(run: dict, api_request, error_message, page_display) -> None:
+def render_review(run: dict, api_request, error_message, page_display, is_admin: bool = True) -> None:
     rows = run.get("claim_rows", [])
     reviews = run.get("reviews", {})
     st.markdown("#### Review claims")
@@ -314,7 +314,7 @@ def render_review(run: dict, api_request, error_message, page_display) -> None:
                                    horizontal=True, key=f"verdict_{row['key']}")
                 notes = st.text_input("Notes (optional)", value=existing["notes"] if existing else "",
                                       key=f"notes_{row['key']}")
-                if st.form_submit_button("Save review"):
+                if st.form_submit_button("Save review", disabled=not is_admin):
                     response = api_request("PUT", f"/api/evaluation/runs/{run['run_id']}/reviews",
                                            json={"key": row["key"], "human_verdict": verdict, "notes": notes}, timeout=10.0)
                     if response is not None and response.is_success:
@@ -349,9 +349,12 @@ def render_question_inspector(run: dict) -> None:
 
 # ---- tab entry point ------------------------------------------------------------------------------
 
-def render_evaluation_tab(api_request, error_message, page_display) -> None:
+def render_evaluation_tab(api_request, error_message, page_display, is_admin: bool = True) -> None:
     dataset = render_dataset(api_request)
-    render_run_controls(api_request, error_message, dataset)
+    if is_admin:
+        render_run_controls(api_request, error_message, dataset)
+    else:
+        st.caption("Read-only account: you can view runs and metrics; starting runs and reviewing need an admin.")
 
     st.subheader("Runs")
     response = api_request("GET", "/api/evaluation/runs", timeout=10.0)
@@ -372,5 +375,5 @@ def render_evaluation_tab(api_request, error_message, page_display) -> None:
         render_retrieval_run(run)
     else:
         render_answer_metrics(run)
-        render_review(run, api_request, error_message, page_display)
+        render_review(run, api_request, error_message, page_display, is_admin)
         render_question_inspector(run)

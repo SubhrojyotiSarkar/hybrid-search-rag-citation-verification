@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     unsupported_claim_policy: Literal["remove", "flag"] = "remove"
     verification_max_claims_per_call: int = Field(default=10, gt=0)
 
+    # Login. Off by default for local development; turn it on before exposing the app
+    # anywhere. With it on, the backend refuses to start without a secret key and an admin.
+    auth_enabled: bool = False
+    auth_secret_key: SecretStr | None = None
+    auth_token_ttl_minutes: int = Field(default=480, gt=0, le=10080)
+    # Defaults to <DATA_DIR>/users.json (gitignored, kept with the rest of the data).
+    auth_users_file: Path | None = None
+
     # Evaluation: datasets, run results and human reviews live under this folder.
     evaluation_dir: Path = Path("evaluation")
     # Pace answer-evaluation runs to the provider's per-minute request quota.
@@ -106,6 +114,12 @@ class Settings(BaseSettings):
     @property
     def index_dir(self) -> Path:
         return self.data_dir / "indexes"
+
+    @property
+    def auth_users_path(self) -> Path:
+        if self.auth_users_file is None:
+            return self.data_dir / "users.json"
+        return self.auth_users_file if self.auth_users_file.is_absolute() else (PROJECT_ROOT / self.auth_users_file).resolve()
 
     @property
     def eval_results_dir(self) -> Path:

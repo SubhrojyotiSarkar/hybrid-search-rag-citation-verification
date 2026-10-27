@@ -142,6 +142,29 @@ free-tier usage may be used to improve its products: do not upload confidential 
 Both can also be started from the Evaluation tab. Dataset format, metric definitions and
 the human review protocol: [docs/evaluation.md](docs/evaluation.md).
 
+## Login
+
+Login is off by default for local use. **Turn it on before running the app anywhere
+others can reach it.**
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.auth_admin generate-secret          # paste the line into .env
+.\.venv\Scripts\python.exe -m backend.auth_admin add-user alice --role admin
+.\.venv\Scripts\python.exe -m backend.auth_admin add-user recruiter --role viewer
+# then set AUTH_ENABLED=true in .env and restart the backend
+```
+
+| Role | Can |
+|---|---|
+| `admin` | everything: upload, delete, re-process, start evaluation runs, save reviews |
+| `viewer` | read-only: ask questions, browse documents, use the Retrieval inspector, view evaluation results |
+
+Passwords are stored only as salted scrypt hashes in `data/users.json` (gitignored).
+Sessions are HMAC-signed tokens that expire after 8 hours; five wrong passwords lock an
+account for 15 minutes. Roles are enforced by the backend, not just hidden in the UI. With
+login enabled but no secret key or no admin, the backend refuses to start. Refreshing the
+browser page requires logging in again (Streamlit does not keep the session).
+
 ## Maintenance
 
 With the backend stopped:
@@ -161,7 +184,7 @@ every backend log line includes it.
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-242 passing tests, plus 1 opt-in real-model test (skipped unless `RUN_MODEL_TESTS=1`) and
+267 passing tests, plus 1 opt-in real-model test (skipped unless `RUN_MODEL_TESTS=1`) and
 1 expected failure that documents the known RRF limitation. The suite uses fake embedders, rerankers
 and LLMs, so it needs no network access, no API key and no model downloads.
 
@@ -189,7 +212,8 @@ tests/            pytest suite
 - Verification is an LLM judgment: probabilistic, checked against human reviews but not
   guaranteed. "Supported" means *supported by the cited passage*, not true in the world.
 - English-oriented models (MiniLM, ms-marco cross-encoder); quality on other languages is untested.
-- Single user, no authentication; evaluation jobs live in memory.
+- One shared document collection: login separates admins from read-only viewers, but all
+  users see the same documents. Evaluation jobs live in memory.
 - The evaluation dataset is still small; no general claims about improvements are made yet.
 
 More in [docs/evaluation.md](docs/evaluation.md#limitations) and

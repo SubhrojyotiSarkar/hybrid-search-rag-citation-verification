@@ -25,6 +25,7 @@ class HealthResponse(BaseModel):
     embedding_model: str
     retrieval_ready: bool
     retrieval_mode: str
+    auth_enabled: bool = False  # the frontend shows a login form when True
     indexed_vectors: int
     bm25_chunks: int
     reranker_model: str

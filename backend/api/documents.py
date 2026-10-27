@@ -7,7 +7,18 @@ a readable message and branch on a stable code. Stack traces are never returned.
 from fastapi import APIRouter, Depends, Response, UploadFile, status
 from fastapi.responses import FileResponse
 
-from backend.api.dependencies import api_error, get_pipeline, get_repository
+from backend.api.dependencies import (
+    api_error,
+    get_file_principal,
+    get_pipeline,
+    get_principal,
+    get_repository,
+    require_admin,
+)
+
+# Reading needs any logged-in user; changing documents needs an admin.
+READ = [Depends(get_principal)]
+ADMIN = [Depends(require_admin)]
 from backend.config import get_settings
 from backend.ingestion.pipeline import IngestionError, IngestionPipeline
 from backend.schemas import Chunk, DocumentRecord
@@ -22,7 +33,7 @@ def _not_found(document_id: str):
 
 # Sync (def) endpoints run in FastAPI's thread pool, so CPU-bound ingestion does not
 # block the event loop.
-@router.post("/upload", response_model=DocumentRecord, status_code=status.HTTP_201_CREATED)
+@router.post("/upload", response_model=DocumentRecord, status_code=status.HTTP_201_CREATED, dependencies=ADMIN)
 def upload_document(file: UploadFile, pipeline: IngestionPipeline = Depends(get_pipeline)) -> DocumentRecord:
     # Read at most one byte past the limit: enough to detect an oversized file without
     # loading an arbitrarily large upload into memory.
@@ -35,12 +46,12 @@ def upload_document(file: UploadFile, pipeline: IngestionPipeline = Depends(get_
         raise api_error(500, "internal_error", "Unexpected error while processing the document.") from exc
 
 
-@router.get("", response_model=list[DocumentRecord])
+@router.get("", response_model=list[DocumentRecord], dependencies=READ)
 def list_documents(repository: DocumentRepository = Depends(get_repository)) -> list[DocumentRecord]:
     return repository.list_all()
 
 
-@router.get("/{document_id}", response_model=DocumentRecord)
+@router.get("/{document_id}", response_model=DocumentRecord, dependencies=READ)
 def get_document(document_id: str, repository: DocumentRepository = Depends(get_repository)) -> DocumentRecord:
     document = repository.get(document_id)
     if document is None:
@@ -48,7 +59,7 @@ def get_document(document_id: str, repository: DocumentRepository = Depends(get_
     return document
 
 
-@router.get("/{document_id}/chunks", response_model=list[Chunk])
+@router.get("/{document_id}/chunks", response_model=list[Chunk], dependencies=READ)
 def list_document_chunks(
     document_id: str, repository: DocumentRepository = Depends(get_repository)
 ) -> list[Chunk]:
@@ -57,7 +68,7 @@ def list_document_chunks(
     return repository.list_chunks(document_id)
 
 
-@router.post("/{document_id}/reprocess", response_model=DocumentRecord)
+@router.post("/{document_id}/reprocess", response_model=DocumentRecord, dependencies=ADMIN)
 def reprocess_document(document_id: str, pipeline: IngestionPipeline = Depends(get_pipeline)) -> DocumentRecord:
     """Re-extract and re-chunk a stored PDF in place (same document_id), e.g. after the
     chunking logic changed. If it fails, the existing chunks stay searchable."""
@@ -67,7 +78,7 @@ def reprocess_document(document_id: str, pipeline: IngestionPipeline = Depends(g
         raise api_error(exc.status_code, exc.code, exc.message, exc.document_id) from exc
 
 
-@router.get("/{document_id}/file")
+@router.get("/{document_id}/file", dependencies=[Depends(get_file_principal)])
 def get_document_file(document_id: str, repository: DocumentRepository = Depends(get_repository)) -> FileResponse:
     """The original PDF, served inline so browsers can open it at a page (…/file#page=4)."""
     document = repository.get(document_id)
@@ -79,7 +90,7 @@ def get_document_file(document_id: str, repository: DocumentRepository = Depends
     )
 
 
-@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=ADMIN)
 def delete_document(document_id: str, pipeline: IngestionPipeline = Depends(get_pipeline)) -> Response:
     if not pipeline.delete(document_id):
         raise _not_found(document_id)

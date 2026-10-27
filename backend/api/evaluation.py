@@ -9,10 +9,10 @@ import json
 import re
 from typing import Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
-from backend.api.dependencies import api_error
+from backend.api.dependencies import api_error, require_admin
 from backend.config import get_settings
 from backend.evaluation.citation_metrics import (
     VERDICTS,
@@ -101,7 +101,7 @@ def get_metrics(run_id: str) -> dict:
     return compute_answer_metrics(run, load_reviews(get_settings().eval_reviews_dir, run_id))
 
 
-@router.put("/runs/{run_id}/reviews")
+@router.put("/runs/{run_id}/reviews", dependencies=[Depends(require_admin)])
 def put_review(run_id: str, request: ReviewRequest) -> dict:
     run = _load_run(run_id)
     if run["kind"] != "answers":
@@ -128,7 +128,7 @@ def _dataset_path():
     return get_settings().evaluation_dir / "datasets" / "questions.jsonl"
 
 
-@router.post("/run", response_model=EvaluationJob, status_code=202)
+@router.post("/run", response_model=EvaluationJob, status_code=202, dependencies=[Depends(require_admin)])
 def start_run(request: RunRequest, http_request: Request) -> EvaluationJob:
     """Start an evaluation in the background; poll GET /api/evaluation/jobs/{job_id}."""
     from backend.evaluation.run_answer_eval import execute_answer_eval

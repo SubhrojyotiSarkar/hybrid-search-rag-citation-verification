@@ -9,10 +9,13 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from backend.api import auth as auth_routes
 from backend.api import chat, documents, evaluation, search
+from backend.api.dependencies import get_principal
+from backend.auth import AuthContext, build_auth
 from backend.config import get_settings
 from backend.logging_config import configure_logging, new_request_id, request_id_var
 from backend.evaluation.jobs import JobManager
@@ -47,6 +50,16 @@ def create_app(
         settings = get_settings()
         settings.ensure_directories()
         logger.info("Data directory: %s", settings.data_dir)
+
+        # Login first: if it is enabled but misconfigured, refuse to start (fail closed)
+        # rather than serve an unprotected app.
+        app.state.auth = build_auth(settings)
+        if app.state.auth.enabled:
+            logger.info("Login enabled: %d account(s) in %s", len(app.state.auth.users.list_users()),
+                        settings.auth_users_path)
+        else:
+            logger.warning("Login is DISABLED (AUTH_ENABLED=false): anyone who can reach this server has "
+                           "full access. Enable it before exposing the app beyond your own machine.")
 
         app.state.db = Database(settings.database_path)
         app.state.db.initialize()
@@ -95,11 +108,16 @@ def create_app(
     app = FastAPI(
         title="Hybrid-Search RAG with Citation Verification", version=get_settings().app_version, lifespan=lifespan
     )
-    app.include_router(documents.router)
-    app.include_router(search.router)
-    app.include_router(chat.router)
-    app.include_router(evaluation.router)
+    # Every /api route needs a logged-in user (no-op while login is disabled); routes that
+    # change data additionally require an admin (declared on the routes themselves).
+    logged_in = [Depends(get_principal)]
+    app.include_router(auth_routes.router)
+    app.include_router(documents.router)  # per-route: reads / admin changes / PDF file tokens
+    app.include_router(search.router, dependencies=logged_in)
+    app.include_router(chat.router, dependencies=logged_in)
+    app.include_router(evaluation.router, dependencies=logged_in)
     app.state.jobs = JobManager()  # background evaluation runs (one at a time)
+    app.state.auth = AuthContext(enabled=False)  # replaced at startup by build_auth()
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -117,7 +135,9 @@ def create_app(
                 "code": "internal_error", "message": "An unexpected error occurred.", "request_id": request_id}})
         duration_ms = (time.perf_counter() - started) * 1000
         log = access_logger.debug if request.url.path == "/health" else access_logger.info
-        log("%s %s -> %d (%.0f ms)", request.method, request.url.path, response.status_code, duration_ms)
+        principal = getattr(request.state, "principal", None)
+        user = f" user={principal.username}" if principal else ""
+        log("%s %s -> %d (%.0f ms)%s", request.method, request.url.path, response.status_code, duration_ms, user)
         request_id_var.reset(token)
         response.headers["X-Request-ID"] = request_id
         return response
@@ -133,6 +153,7 @@ def create_app(
             embedding_model=settings.embedding_model_name,
             retrieval_ready=retrieval is not None,
             retrieval_mode=settings.retrieval_mode,
+            auth_enabled=request.app.state.auth.enabled,
             indexed_vectors=retrieval.vector_store.count if retrieval else 0,
             bm25_chunks=retrieval.bm25_index.count if retrieval else 0,
             reranker_model=settings.reranker_model_name,

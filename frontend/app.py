@@ -61,8 +61,11 @@ def page_display(chunk: dict) -> str:
 
 
 def pdf_link(document_id: str, page_number: int) -> str:
-    """Opens the original PDF at the physical page (browsers support #page=N)."""
-    return f"{PUBLIC_BACKEND_URL}/api/documents/{document_id}/file#page={page_number}"
+    """Opens the original PDF at the physical page (browsers support #page=N). With login on,
+    the link carries the file-only token: it can download PDFs but call nothing else."""
+    session = st.session_state.get("auth")
+    query = f"?token={session['file_token']}" if session else ""
+    return f"{PUBLIC_BACKEND_URL}/api/documents/{document_id}/file{query}#page={page_number}"
 
 
 SUPPORT_MARKS = {True: "✅ supports", False: "✖ does not support", None: ""}
@@ -147,12 +150,43 @@ def render_answer(response: dict) -> None:
 
 
 def api_request(method: str, path: str, **kwargs) -> httpx.Response | None:
-    """Send a request to the backend; show an error and return None if it is unreachable."""
+    """Send a request to the backend (with the login token, if any); show an error and
+    return None if it is unreachable. A 401 means the session expired: log out."""
+    session = st.session_state.get("auth")
+    if session:
+        kwargs["headers"] = {**kwargs.get("headers", {}), "Authorization": f"Bearer {session['access_token']}"}
     try:
-        return httpx.request(method, f"{BACKEND_URL}{path}", **kwargs)
+        response = httpx.request(method, f"{BACKEND_URL}{path}", **kwargs)
     except httpx.HTTPError as exc:
         st.error(f"Cannot reach backend at {BACKEND_URL} ({exc.__class__.__name__})")
         return None
+    if response.status_code == 401 and session:
+        st.session_state.pop("auth", None)
+        st.warning("Your session has expired. Please log in again.")
+        st.rerun()
+    return response
+
+
+def render_login() -> None:
+    """Login form; stops the page until the user is logged in."""
+    st.title("Hybrid-Search RAG with Citation Verification")
+    st.caption("Log in to continue. Ask the administrator for an account.")
+    with st.form("login"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.form_submit_button("Log in"):
+            try:
+                response = httpx.post(f"{BACKEND_URL}/api/auth/login",
+                                      json={"username": username, "password": password}, timeout=15.0)
+            except httpx.HTTPError as exc:
+                st.error(f"Cannot reach backend at {BACKEND_URL} ({exc.__class__.__name__})")
+                st.stop()
+            if response.is_success:
+                st.session_state.auth = response.json()
+                st.rerun()
+            else:
+                st.error(error_message(response))
+    st.stop()
 
 
 # ---- Sidebar: system status ---------------------------------------------------------
@@ -173,6 +207,27 @@ with st.sidebar:
     st.caption(f"LLM: {health['llm_provider']} / {health['llm_model']}")
     if not health["llm_configured"]:
         st.warning("No LLM API key configured. Question answering will be unavailable.")
+
+AUTH_ENABLED = health.get("auth_enabled", False)
+if AUTH_ENABLED and "auth" not in st.session_state:
+    render_login()
+
+session = st.session_state.get("auth")
+# Without login (local development) the user has full access. Hiding admin controls is a
+# convenience only: the backend refuses admin actions from viewers regardless.
+IS_ADMIN = not AUTH_ENABLED or (session and session["role"] == "admin")
+with st.sidebar:
+    if AUTH_ENABLED:
+        st.divider()
+        st.caption(f"Logged in as **{session['username']}** ({session['role']})")
+        if not IS_ADMIN:
+            st.caption("Read-only account: uploading, deleting and evaluation runs are disabled.")
+        if st.button("Log out"):
+            st.session_state.pop("auth", None)
+            st.session_state.pop("history", None)
+            st.rerun()
+    else:
+        st.caption("Login is disabled (local mode).")
 
 st.title("Hybrid-Search RAG with Citation Verification")
 
@@ -233,9 +288,12 @@ with ask_tab:
 
 # ---- Documents tab ----------------------------------------------------------------------
 with documents_tab:
+    if not IS_ADMIN:
+        st.info("Read-only account: you can browse documents and their chunks, but not upload or delete.")
     with st.form("upload_form", clear_on_submit=True):
-        files = st.file_uploader("Upload PDF documents", type=["pdf"], accept_multiple_files=True)
-        submitted = st.form_submit_button("Upload and process")
+        files = st.file_uploader("Upload PDF documents", type=["pdf"], accept_multiple_files=True,
+                                 disabled=not IS_ADMIN)
+        submitted = st.form_submit_button("Upload and process", disabled=not IS_ADMIN)
 
     if submitted and files:
         for uploaded in files:
@@ -274,7 +332,7 @@ with documents_tab:
             st.caption(f"Document ID: {doc['document_id']}")
 
             col_chunks, col_reprocess, col_delete = st.columns([1, 1, 1])
-            if col_reprocess.button("Re-process", key=f"reprocess_{doc['document_id']}",
+            if col_reprocess.button("Re-process", key=f"reprocess_{doc['document_id']}", disabled=not IS_ADMIN,
                                     help="Re-extract and re-chunk the stored PDF with the current settings, "
                                          "keeping the document ID. Use after changing chunking settings."):
                 with st.spinner("Re-processing..."):
@@ -293,7 +351,7 @@ with documents_tab:
                             f"{chunk['token_count']} tokens"
                         )
                         st.text(chunk["text"])
-            if col_delete.button("Delete", key=f"delete_{doc['document_id']}"):
+            if col_delete.button("Delete", key=f"delete_{doc['document_id']}", disabled=not IS_ADMIN):
                 delete_response = api_request("DELETE", f"/api/documents/{doc['document_id']}", timeout=30.0)
                 if delete_response is not None and delete_response.status_code == 204:
                     st.rerun()
@@ -373,4 +431,4 @@ with retrieval_tab:
 
 # ---- Evaluation tab ---------------------------------------------------------------------------
 with evaluation_tab:
-    render_evaluation_tab(api_request, error_message, page_display)
+    render_evaluation_tab(api_request, error_message, page_display, is_admin=IS_ADMIN)

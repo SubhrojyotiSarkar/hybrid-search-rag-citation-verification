@@ -111,7 +111,30 @@ truncation, invalid output) and checks the finish reason before parsing.
 | `POST /api/chat/ask` | full answer with claims, citations, verification |
 | `GET /api/evaluation/runs`, `GET /api/evaluation/runs/{id}`, `PUT /api/evaluation/runs/{id}/reviews` | runs, metrics, human reviews |
 | `POST /api/evaluation/run`, `GET /api/evaluation/jobs/{id}` | background evaluation jobs |
+| `POST /api/auth/login`, `GET /api/auth/me` | login (when enabled) and the current user |
 | `GET /health` | configuration and readiness (never secrets) |
+
+## Authentication
+
+Optional (`AUTH_ENABLED`), standard library only (`backend/auth.py`):
+
+- **Accounts** in `data/users.json` with salted scrypt password hashes, managed with
+  `python -m backend.auth_admin`. Unknown usernames cost the same time as wrong passwords
+  and get the same message, so the login does not reveal which accounts exist.
+- **Tokens**: `base64url(JSON) . base64url(HMAC-SHA256)` with subject, role, scope and
+  expiry, signed with `AUTH_SECRET_KEY`. An `api` token authorizes API calls; a `file`
+  token, embedded in "open PDF" links (browsers cannot send headers for links), can only
+  download PDFs. Every request re-checks that the user still exists with the same role,
+  so removing a user or changing their role ends existing sessions immediately.
+- **Roles** are enforced by FastAPI dependencies: every `/api` route needs a logged-in user;
+  routes that change data (upload, delete, re-process, evaluation runs, reviews) need
+  `admin`. `/health` and `/api/auth/login` are public.
+- **Throttling**: 5 failed logins lock a username for 15 minutes (in memory).
+- **Fail closed**: login enabled with a missing or short secret key, or no admin account,
+  stops the backend at startup instead of serving an unprotected app.
+
+Not covered: per-user document collections, password reset by email, single sign-on,
+and HTTPS itself (put the app behind a TLS-terminating reverse proxy when deploying).
 
 ## Operations
 
@@ -138,7 +161,7 @@ truncation, invalid output) and checks the finish reason before parsing.
 - **The quote check is strict**: it rejects correct verdicts whose quote is slightly off,
   which costs a recovery attempt (observed once in a real run). The rejected quote is
   recorded so this can be measured.
-- **Single process.** Jobs and BM25 live in memory; FAISS is a flat index (exact search,
-  fine for tens of thousands of chunks). Multi-user use would need authentication,
-  per-user collections and a shared job queue.
+- **Single process.** Jobs, BM25 and login throttling live in memory; FAISS is a flat
+  index (exact search, fine for tens of thousands of chunks). Real multi-user use would
+  need per-user collections and a shared job queue on top of the existing login.
 - **Text PDFs only**; table structure is recovered heuristically from extracted text.

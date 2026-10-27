@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from fastapi import Depends, HTTPException, Request
 
+from backend.auth import Principal
 from backend.config import get_settings
 from backend.generation.answer_generator import AnswerGenerator
 from backend.generation.factory import build_answer_generator
@@ -28,6 +29,54 @@ def api_error(status_code: int, code: str, message: str, document_id: str | None
         # Lets a user report an error that can be matched to its log lines.
         detail["request_id"] = request_id_var.get()
     return HTTPException(status_code=status_code, detail=detail)
+
+
+# ---- authentication -----------------------------------------------------------------------
+
+# With login disabled (local development), every request acts as this admin.
+LOCAL_ADMIN = Principal("local", "admin")
+
+
+def _not_authenticated(message: str = "Log in to use this application.") -> HTTPException:
+    return HTTPException(status_code=401, detail={"code": "not_authenticated", "message": message},
+                         headers={"WWW-Authenticate": "Bearer"})
+
+
+def _resolve(request: Request, token: str, scope: str) -> Principal:
+    auth = request.app.state.auth
+    principal = auth.tokens.verify(token, scope) if token else None
+    # A valid token of a user who has since been removed (or whose role changed) is refused.
+    if principal is None or auth.users.list_users().get(principal.username) != principal.role:
+        raise _not_authenticated("Your session is invalid or has expired. Log in again.")
+    request.state.principal = principal  # read by the access log
+    return principal
+
+
+def get_principal(request: Request) -> Principal:
+    """The logged-in user (any role). Requires `Authorization: Bearer <access token>`."""
+    if not request.app.state.auth.enabled:
+        return LOCAL_ADMIN
+    header = request.headers.get("Authorization", "")
+    if not header.lower().startswith("bearer "):
+        raise _not_authenticated()
+    return _resolve(request, header[7:].strip(), "api")
+
+
+def require_admin(principal: Principal = Depends(get_principal)) -> Principal:
+    if not principal.is_admin:
+        raise api_error(403, "admin_required", "This action needs an admin account.")
+    return principal
+
+
+def get_file_principal(request: Request) -> Principal:
+    """For PDF downloads: an access token header, or a file-scoped token in ?token=.
+    Browser links cannot send headers; a leaked file token can only download PDFs."""
+    if not request.app.state.auth.enabled:
+        return LOCAL_ADMIN
+    header = request.headers.get("Authorization", "")
+    if header.lower().startswith("bearer "):
+        return _resolve(request, header[7:].strip(), "api")
+    return _resolve(request, request.query_params.get("token", ""), "file")
 
 
 def get_repository(request: Request) -> DocumentRepository:
