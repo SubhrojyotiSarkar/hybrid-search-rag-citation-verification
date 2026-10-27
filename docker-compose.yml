@@ -1,20 +1,23 @@
-# Run from the project root:   docker compose up --build
-# Then open http://localhost:8501 (frontend). The API is on http://localhost:8000/docs.
-# The first start downloads ~200 MB of models into the model-cache volume.
+# Run from the project root:   docker compose up -d --build
+# Then open the site: https://<SITE_ADDRESS> on a server, or http://localhost locally.
+# Only the proxy is reachable from outside; backend and frontend talk on Docker's internal
+# network. The first start downloads ~200 MB of models into the model-cache volume.
+# Step-by-step server setup: docs/deploy-aws.md
 
 services:
   backend:
     build: .
-    env_file: .env                 # GEMINI_API_KEY etc.; never copied into the image
+    env_file: .env                 # GEMINI_API_KEY, AUTH_*, etc.; never copied into the image
     environment:
       DATA_DIR: /app/data          # override relative paths from .env
       EVALUATION_DIR: /app/evaluation
     volumes:
-      - ./data:/app/data           # documents, SQLite, FAISS index (same as a local run)
+      - ./data:/app/data           # documents, SQLite, FAISS index, users.json
       - ./evaluation:/app/evaluation  # dataset, runs, human reviews (editable on the host)
       - model-cache:/models
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"                     # internal only: not published on the host
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 30s
@@ -25,15 +28,42 @@ services:
   frontend:
     build: .
     command: ["python", "-m", "streamlit", "run", "frontend/app.py",
-              "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+              "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true",
+              "--browser.gatherUsageStats=false"]
     environment:
-      BACKEND_URL: http://backend:8000          # container-to-container
-      PUBLIC_BACKEND_URL: http://localhost:8000 # what your browser uses for "open PDF" links
-    ports:
-      - "8501:8501"
+      BACKEND_URL: http://backend:8000  # container-to-container
+      PUBLIC_BACKEND_URL: ""            # "open PDF" links are relative: same site, via the proxy
+    expose:
+      - "8501"
+    restart: unless-stopped
     depends_on:
       backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  proxy:
+    image: caddy:2.8.4-alpine
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}  # set to your domain in .env for automatic HTTPS
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"              # HTTP/3
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data           # TLS certificates: keep, or Let's Encrypt rate limits apply
+      - caddy-config:/config
+    restart: unless-stopped
+    depends_on:
+      frontend:
         condition: service_healthy
 
 volumes:
   model-cache:
+  caddy-data:
+  caddy-config:

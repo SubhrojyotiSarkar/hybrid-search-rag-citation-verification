@@ -5,6 +5,7 @@ experiments are reproducible: the active configuration can be logged and compare
 Environment variables take precedence over values in .env.
 """
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -14,10 +15,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# RAG_ENV_FILE overrides which settings file is read; an empty value reads none. The test
+# suite sets it to "" so a developer's personal .env (e.g. AUTH_ENABLED=true) cannot change
+# test behaviour.
+_env_file_override = os.environ.get("RAG_ENV_FILE")
+if _env_file_override is None:
+    ENV_FILE: Path | None = PROJECT_ROOT / ".env"
+else:
+    ENV_FILE = Path(_env_file_override) if _env_file_override else None
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / ".env",
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )

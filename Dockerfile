@@ -27,4 +27,6 @@ RUN useradd --create-home --uid 1000 app \
 USER app
 
 EXPOSE 8000 8501
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-access-log: uvicorn's access log prints full URLs, including the file token of
+# "open PDF" links; the backend's own access log (with request IDs) records paths only.
+CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

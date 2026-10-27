@@ -68,5 +68,12 @@ def test_log_records_get_the_current_request_id():
     assert record.request_id == "abc123"
 
 
+def test_tests_never_read_the_developers_env_file():
+    # Regression: a personal .env with AUTH_ENABLED=true once broke ~100 tests.
+    import backend.config
+
+    assert backend.config.ENV_FILE is None
+
+
 def test_new_request_id_rejects_overlong_ids():
     assert new_request_id("x" * 65) != "x" * 65

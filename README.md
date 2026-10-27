@@ -99,10 +99,17 @@ On macOS/Linux use `python3.11 -m venv .venv` and `.venv/bin/python` instead of
 
 ```powershell
 Copy-Item .env.example .env   # and set GEMINI_API_KEY
-docker compose up --build
+docker compose up -d --build
 ```
 
-`data/` and `evaluation/` are mounted from the host; models are cached in a volume.
+Open http://localhost. Three containers run: the backend, the frontend, and a Caddy
+reverse proxy that is the only public entry point (it serves the app and PDF links;
+the rest of the API stays private). `data/` and `evaluation/` are mounted from the host;
+models and TLS certificates are kept in volumes.
+
+**Deploying to a server (AWS EC2, automatic HTTPS):** step by step in
+[docs/deploy-aws.md](docs/deploy-aws.md).
+
 **The Docker setup has not been built or run yet** (Docker was not available on the
 development machine); treat it as a starting point and report issues.
 
@@ -184,7 +191,7 @@ every backend log line includes it.
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-267 passing tests, plus 1 opt-in real-model test (skipped unless `RUN_MODEL_TESTS=1`) and
+268 passing tests, plus 1 opt-in real-model test (skipped unless `RUN_MODEL_TESTS=1`) and
 1 expected failure that documents the known RRF limitation. The suite uses fake embedders, rerankers
 and LLMs, so it needs no network access, no API key and no model downloads.
 

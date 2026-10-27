@@ -1,0 +1,36 @@
+# Reverse proxy: the only public entry point (see docs/deploy-aws.md).
+#
+# SITE_ADDRESS (set in .env):
+#   a domain, e.g. rag.example.com  -> automatic HTTPS (Let's Encrypt; DNS must point here
+#                                      and ports 80 + 443 must be open)
+#   :80 (default)                    -> plain HTTP, for local testing only
+#
+# Upstreams default to the docker-compose service names; override them to run the proxy
+# outside Docker (e.g. for a local test).
+
+{$SITE_ADDRESS::80} {
+	encode gzip
+
+	header {
+		# "Open PDF" links carry a file-only token in the URL: never send it to other sites.
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		-Server
+	}
+
+	# The only API route reachable from outside: PDF downloads opened by the browser.
+	# Every other API route (including /docs) stays private; the frontend calls the
+	# backend directly inside Docker.
+	@pdf path_regexp ^/api/documents/[A-Za-z0-9_-]+/file$
+	handle @pdf {
+		reverse_proxy {$BACKEND_UPSTREAM:backend:8000}
+	}
+
+	# Everything else is the Streamlit app (WebSockets are proxied automatically).
+	handle {
+		reverse_proxy {$FRONTEND_UPSTREAM:frontend:8501}
+	}
+
+	# No access log on purpose: URLs of PDF links contain the file token.
+}

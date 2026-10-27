@@ -1,5 +1,10 @@
 import hashlib
+import os
 import re
+
+# Must run before any backend module is imported: tests never read the developer's .env,
+# so personal settings (AUTH_ENABLED, RETRIEVAL_MODE, ...) cannot change their outcome.
+os.environ["RAG_ENV_FILE"] = ""
 
 import numpy as np
 import pymupdf
